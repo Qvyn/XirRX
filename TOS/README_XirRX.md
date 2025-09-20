@@ -2,8 +2,6 @@
 
 A clean Windows desktop **suite** that hosts your two tools — **InputRX** (input refinement/tuning) and **CrossXir** (crosshair overlay) — plus a **Launcher** for external apps and a **Streamer Mode** switch that hides the overlay from recordings/screenshots (while keeping it visible to you).
 
-> This suite only *hosts* your apps. It does **not** change InputRX or CrossXir internals.
-
 ---
 
 ## Features
