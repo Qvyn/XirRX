@@ -141,17 +141,3 @@ Use **Browse…** to select the exact `.exe`. If the app needs a working directo
 
 **Windows blocks the EXE**  
 Unsigned EXEs may show SmartScreen warnings. You can sign the binary or allow it on your machine.
-
----
-
-## Roadmap (optional)
-
-- Per-game **Auto‑rules** (opt-in, suite-scoped only).
-- Launchers: drag‑to‑reorder, per‑launcher “start with suite.”
-- Tray: quick Launchers for the first 8 items.
-
----
-
-## License
-
-MIT (or your preferred license). Update this section if you plan to redistribute.
