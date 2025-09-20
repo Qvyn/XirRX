@@ -1,12 +1,3 @@
-# E:\misc\aimtuner\input_refiner_pyqt6_stable.py
-# Jacinto Input Refiner — PyQt6 (crash‑hardened):
-# - Soft restart (no thread tear‑down) when applying config
-# - UI signal throttle (caps to 120 Hz) to avoid painter reentrancy
-# - Extra try/except around XInput, SendInput, painting, focus title, etc.
-# - Atomic per‑tick config snapshot to avoid mid‑tick mutations
-# - Safe QObject refs (replaces QPointer)
-# SAFE: OS-level mouse move only (SendInput). No clicks/keys/macros. No DX hooks. No game memory access.
-
 from __future__ import annotations
 import ctypes, json, math, os, sys, time, logging, pathlib, faulthandler, weakref
 from dataclasses import dataclass, asdict, replace
