@@ -6,7 +6,6 @@
 - Fixed crashes and missing handlers from earlier patches.
 - Kept all features/settings intact. Final build used: **`input_refiner_pyqt6_stable_patched_ultrasens
 ---
-
 ## Fixed 
 
 ### 1) Apply should not load/save profiles
@@ -20,7 +19,7 @@
 **Result:** pressing **Apply** immediately takes effect without reloading or switching profiles.
 
 ### 2) Clear feedback without a status bar
-- Your `MainWindow` didn’t expose `statusBar()`. We removed the status-bar call to avoid the crash and updated the existing label text to:
+-  `MainWindow` didn’t expose `statusBar()`. Removed the status-bar call to avoid the crash and updated the existing label text to:
   - **“Applied ✓ — no profile load”**
 
 **Result:** no crash; explicit confirmation that Apply didn’t touch profiles.
@@ -34,7 +33,7 @@
 ---
 
 ## How to verify (quick)
-1. Launch the **v5** file.
+1. Launch the file.
 2. Ensure **Enabled** is on; uncheck **Only when focused** while testing on desktop.
 3. Change a slider; press **Apply**.
 4. Confirm:
@@ -45,7 +44,6 @@
 
 ## Notes & optional (deferred) improvements
 - **Queued Apply → worker:** We can also wire `applyConfig` **directly to `worker.apply_config` with a `QueuedConnection`** inside `WorkerManager.start()` for extra determinism on some systems.  
-  *Deferred by request to keep behavior identical to your working baseline. Say the word and I’ll deliver this as a one‑line patch file.*
 
 - **Profiles usage:** Profiles remain manual: they’re only saved via **Save** and only loaded when you explicitly pick one. Apply doesn’t change profiles.
 
