@@ -1,4 +1,4 @@
-# Channel Log – Apply/Profiles Reliability Fixes
+# ChangeLog – Apply/Profiles Reliability Fixes
 **Date:** 2025-09-24 16:58 
 
 ## TL;DR
