@@ -1,4 +1,4 @@
-# XirRX — Channel Log (All Recent Updates)
+# XirRX — ChangeLog (All Recent Updates)
 
 This log summarizes **all new features, UI changes, optimizations, logging/routing fixes, and build steps** added since the baseline.
 
