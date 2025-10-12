@@ -1,0 +1,122 @@
+# 🎮 Universal UWP / Steam Launcher v1.4
+**Build:** `launcher_SETTINGS_INSTALLED_ONLY_FIXED4.py`  
+**Release Date:** October 12, 2025  
+
+---
+
+## 🚀 Overview
+This launcher bridges **UWP**, **Steam**, and **custom executables** under a unified UI.  
+It now supports **Steam account sign-in**, **automatic library import**, and a full **settings editor** — no more editing JSON files manually.
+
+The goal: a **clean, fast, and consistent** launcher that lets you validate, sync, and launch your games seamlessly.
+
+---
+
+## 🆕 What’s New in v1.4
+
+### 🔑 Steam Sign-In Integration
+- Uses Steam OpenID to sign you into your account.
+- Stores your SteamID64 locally after successful login.
+- Secure: does not expose credentials or API data to third parties.
+
+### 🔧 Steam Web API Key Setup
+- Added **Settings…** dialog (gear icon or “Settings…” button).
+- Paste your [Steam Web API Key](https://steamcommunity.com/dev/apikey) directly into the dialog.
+- Shows your current SteamID64 once signed in.
+- Automatically saves to `settings.json` in `%APPDATA%\UniversalUWPLauncher`.
+
+> 💡 No need to create or edit `settings.json` manually anymore!
+
+### 💾 Portable vs Installed Mode
+| Mode | Behavior |
+|------|-----------|
+| **Portable** | Keeps `settings.json` next to the `.py` file. Ideal for USB drives or self-contained folders. |
+| **Standard (Default)** | Uses `%APPDATA%\UniversalUWPLauncher\settings.json` for persistent, user-specific storage. |
+
+---
+
+## 🧩 Game Library Improvements
+### 🎯 Installed-Only Sync
+- Imports **only installed Steam games** — not your entire library.
+- Uses Steam’s `libraryfolders.vdf` and `appmanifest_*.acf` files to detect actual installs.
+- Automatically skips duplicates using `steam_appid`.
+
+### 🗑️ Safe Removals
+- Removing a game from the list **does not affect your Steam account or install**.
+- It only deletes the entry from your **local launcher list**.
+- Run **Sync Steam Library** again to re-import installed titles.
+
+### 🔍 Validation Flow
+- “Validate via Steam” launches **only once** after validation (duplicate trigger removed).
+- Steam validation happens through the native Steam client.
+
+---
+
+## ⚙️ Settings & Defaults
+### 🧠 Default Preferences
+- Added **Save Defaults** button to save your preferred:
+  - Default Wait Time (seconds)
+  - Default Process Priority  
+- Uses `save_settings()` to persist preferences safely.
+
+### 🛡️ Safe Fallback
+If `_save_defaults` is missing, the launcher automatically falls back to a built-in save handler — no crashes, no missing attributes.
+
+---
+
+## 🌙 UI Enhancements
+- Modern **dark theme** using Fusion palette.
+- Organized layout:  
+  - **Left:** Game list  
+  - **Right:** Details, actions, and log  
+- Clear status feedback with `[✓]`, `[!]`, `[x]`, and `[i]` indicators.
+
+---
+
+## 🧰 Technical Notes
+- `_open_settings` and `_save_defaults` are properly embedded within `MainWindow`.
+- `_on_worker_done_validate()` simplified to prevent multiple launches.
+- `import_owned_games_to_db()` supports `installed_only=True` filter.
+- All UI signal connections use safe binding to prevent AttributeErrors.
+
+---
+
+## 🪶 Known Good State
+| Feature | Status |
+|----------|--------|
+| Steam Sign-In | ✅ |
+| Sync Steam Library | ✅ (Installed-Only) |
+| Settings Dialog | ✅ |
+| Save Defaults | ✅ |
+| Game Launch & Validation | ✅ |
+| Portable Mode | ✅ |
+| AppData Mode | ✅ |
+
+---
+
+## 📁 File Paths
+| File | Purpose |
+|------|----------|
+| `settings.json` | User config (API key, SteamID, defaults) |
+| `%APPDATA%\UniversalUWPLauncher` | Default storage location |
+| `games.json` | Local game list & metadata |
+| `.py` file | Main launcher application |
+
+---
+
+## 💡 Tips
+- Steam library re-sync does not duplicate or uninstall games.
+
+---
+
+## 🧱 Credits 
+**Framework:** PyQt5  
+**Version:** 1.4 (Installed-Only Sync Build)  
+**Last Updated:** October 12, 2025  
+
+---
+
+## 🪄 Future Plans
+- Optional “Import All” toggle in Settings (to allow cloud titles).  
+- Built-in “Repair Library” to detect broken manifests.  
+- Integrated multi-platform game import (Epic, GOG, EA App).
