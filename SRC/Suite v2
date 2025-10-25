@@ -1,0 +1,1398 @@
+
+# suite_one_app_nav_revamp.py
+# Revamped look: adds a "Navigation" landing page with tile cards,
+# refreshed sidebar tab styles, and active/hover states similar to the provided screenshot.
+#
+# Drop-in replacement for running the suite. Functionality of tabs preserved.
+#
+# NOTE: This file was derived from your baseline suite and focuses on UI/UX changes only.
+
+import os, sys, json, subprocess, signal, shlex, pathlib, ctypes, math
+from typing import List, Dict, Optional
+from PyQt6 import QtCore, QtGui, QtWidgets
+
+# External modules expected to be alongside the suite
+import input_refiner_pyqt6_stable_patched_ultrasens as inputrx
+import crosshair_x_designer_stack_patched as crossxir
+import launcher as uwplauncher
+
+APP_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
+DIRS = {
+    "logs": os.path.join(APP_DIR, "logs"),
+    "config": os.path.join(APP_DIR, "config"),
+    "data": os.path.join(APP_DIR, "data"),
+}
+for d in DIRS.values():
+    os.makedirs(d, exist_ok=True)
+
+# Optional psutil
+try:
+    import psutil
+except Exception:
+    psutil = None
+
+# ------------------------- Utilities -------------------------
+def app_path(category: str, filename: str) -> str:
+    base = DIRS.get(category, APP_DIR)
+    return os.path.join(base, filename)
+
+WDA_NONE = 0x0
+WDA_EXCLUDEFROMCAPTURE = 0x11  # Win10 2004+
+
+def apply_capture_exclusion(hwnd: int, enabled: bool) -> bool:
+    try:
+        ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE if enabled else WDA_NONE)
+        return True
+    except Exception:
+        return False
+
+def overlay_hwnd(win) -> Optional[int]:
+    try:
+        ctab = getattr(win, "crossTab", None)
+        ov = getattr(ctab.win, "overlay", None) if ctab else None
+        if ov is None:
+            return None
+        wid = ov.winId()
+        return int(wid)
+    except Exception:
+        return None
+
+# ------------------------- Widgets -------------------------
+
+
+
+class TileButton(QtWidgets.QPushButton):
+    """Minimal tile-style push button used in the Navigation panel."""
+    def __init__(self, text:str = "", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.setCheckable(True)
+        self.setAutoExclusive(False)
+        self.setMinimumHeight(36)
+        self.setStyleSheet(
+            "QPushButton {"
+            "  border: 1px solid rgba(255,255,255,0.10);"
+            "  background: rgba(255,255,255,0.06);"
+            "  border-radius: 10px;"
+            "  padding: 8px 12px;"
+            "  text-align: left;"
+            "}"
+            "QPushButton:hover { background: rgba(255,255,255,0.12); }"
+            "QPushButton:checked { background: rgba(255,255,255,0.18); }"
+        )
+
+class StatusBadge(QtWidgets.QLabel):
+    """Colored text badge: 'running'/'stopped'."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.setMinimumWidth(80)
+        self.setFixedHeight(18)
+        self.set_status(False)
+    def set_status(self, ok: bool):
+        base = "padding: 2px 8px; border-radius: 9px; font-weight: 600;"
+        if ok:
+            self.setText("running")
+            self.setStyleSheet(f"QLabel {{ {base} background: #14b814; color: white; }}")
+        else:
+            self.setText("stopped")
+            self.setStyleSheet(f"QLabel {{ {base} background: #cc3a3a; color: white; }}")
+
+class PulseBar(QtWidgets.QWidget):
+    """Thin animated pulse bar; throttled & paused when not visible."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(6)
+        self._phase = 0.0
+        self._color = QtGui.QColor(80, 160, 255)
+        self._warn_color = QtGui.QColor(255, 90, 90)
+        self._state_until = 0
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(60)  # ~16 FPS
+
+    def showEvent(self, e):
+        if not self._timer.isActive(): self._timer.start(60)
+        return super().showEvent(e)
+
+    def hideEvent(self, e):
+        if self._timer.isActive(): self._timer.stop()
+        return super().hideEvent(e)
+
+    def _tick(self):
+        # Skip updates if not visible to avoid repaint storms
+        if not self.isVisible(): return
+        # Also, if parent window is minimized/inactive, update less frequently
+        w = self.window()
+        if w and not w.isActiveWindow():
+            # drift phase slowly but repaint sparsely
+            self._phase = (self._phase + 0.005) % 1.0
+            if int(QtCore.QTime.currentTime().msec() / 250) % 2 == 0:
+                self.update()
+            return
+        self._phase = (self._phase + 0.02) % 1.0
+        self.update()
+
+    def flash(self, kind: str = "event", duration_ms: int = 1200):
+        if kind == "warn":
+            self._color = self._warn_color
+        else:
+            self._color = QtGui.QColor(80, 200, 170)
+        self._state_until = QtCore.QTime.currentTime().msecsSinceStartOfDay() + duration_ms
+
+    def paintEvent(self, e: QtGui.QPaintEvent):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect().adjusted(0,0,0,-1)
+        t = QtCore.QTime.currentTime().msecsSinceStartOfDay()
+        base = self._color if t <= self._state_until else QtGui.QColor(80, 160, 255)
+        grad = QtGui.QLinearGradient(0, 0, rect.width(), 0)
+        off = self._phase
+        grad.setColorAt(max(0.0, off-0.2), base.darker(120))
+        grad.setColorAt(off, base)
+        grad.setColorAt(min(1.0, off+0.2), base.darker(120))
+        p.fillRect(rect, grad)
+        p.setPen(QtGui.QPen(base.darker(160)))
+        p.drawLine(rect.bottomLeft(), rect.bottomRight())
+    def paintEvent(self, e: QtGui.QPaintEvent):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect().adjusted(0,0,0,-1)
+        t = QtCore.QTime.currentTime().msecsSinceStartOfDay()
+        base = self._color if t <= self._state_until else QtGui.QColor(80, 160, 255)
+        grad = QtGui.QLinearGradient(0, 0, rect.width(), 0)
+        off = self._phase
+        grad.setColorAt(max(0.0, off-0.2), base.darker(120))
+        grad.setColorAt(off, base)
+        grad.setColorAt(min(1.0, off+0.2), base.darker(120))
+        p.fillRect(rect, grad)
+        p.setPen(QtGui.QPen(base.darker(160)))
+        p.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+
+
+
+class NavCard(QtWidgets.QPushButton):
+    """Large tile card used on the Navigation landing page, hover-only shadow for perf."""
+    def __init__(self, title: str, subtitle: str, icon: QtGui.QIcon | None = None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("navcard")
+        self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.setCheckable(False)
+        self.setMinimumSize(220, 120)
+        self.setMaximumHeight(140)
+
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon
+
+        self.setStyleSheet("""
+            #navcard {
+                border: 1px solid rgba(255,255,255,0.06);
+                border-radius: 16px;
+                background: rgba(255,255,255,0.03);
+                text-align: left;
+                padding: 14px;
+            }
+            #navcard:hover {
+                background: rgba(255,255,255,0.07);
+                border: 1px solid rgba(255,255,255,0.15);
+            }
+            #navcard:pressed {
+                background: rgba(56,128,255,0.22);
+                border: 1px solid rgba(56,128,255,0.4);
+            }
+        """)
+
+    def enterEvent(self, e: QtCore.QEvent):
+        app = QtWidgets.QApplication.instance()
+        if app and app.property("perfMode"):
+            return super().enterEvent(e)
+        eff = QtWidgets.QGraphicsDropShadowEffect(self)
+        eff.setBlurRadius(24)
+        eff.setOffset(0, 4)
+        eff.setColor(QtGui.QColor(0, 0, 0, 120))
+        self.setGraphicsEffect(eff)
+        return super().enterEvent(e)
+
+    def leaveEvent(self, e: QtCore.QEvent):
+        self.setGraphicsEffect(None)
+        return super().leaveEvent(e)
+
+    def paintEvent(self, e: QtGui.QPaintEvent):
+        super().paintEvent(e)
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        r = self.rect().adjusted(1,1,-1,-1)
+        # Icon
+        x = 16
+        if self.icon is not None:
+            sz = 28
+            self.icon.paint(p, QtCore.QRect(x, 16, sz, sz))
+            x += sz + 10
+        # Title
+        p.setPen(QtGui.QColor(240,240,240))
+        f = self.font()
+        f.setPointSizeF(f.pointSizeF() + 1.5)
+        f.setWeight(QtGui.QFont.Weight.DemiBold)
+        p.setFont(f)
+        p.drawText(QtCore.QRect(x, 12, r.width()-x-12, 28), int(QtCore.Qt.AlignmentFlag.AlignLeft|QtCore.Qt.AlignmentFlag.AlignVCenter), self.title)
+        # Subtitle
+        p.setPen(QtGui.QColor(190,190,200))
+        f2 = self.font()
+        f2.setPointSizeF(f2.pointSizeF() - 0.5)
+        p.setFont(f2)
+        p.drawText(QtCore.QRect(x, 40, r.width()-x-12, 60), int(QtCore.Qt.AlignmentFlag.AlignLeft|QtCore.Qt.AlignmentFlag.AlignTop), self.subtitle)
+
+class SectionHeader(QtWidgets.QLabel):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setStyleSheet("font-size:16px; font-weight:800; margin: 6px 2px;")
+
+
+class LedDot(QtWidgets.QWidget):
+    """Ultra‑light LED: custom paint, repaints only on state change."""
+    def __init__(self, size=12, parent=None):
+        super().__init__(parent)
+        self._on = False
+        self._color_on = QtGui.QColor(80, 200, 120)
+        self._color_off = QtGui.QColor(220, 80, 80)
+        self.setFixedSize(size, size)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
+
+    def set_status(self, ok: bool):
+        if bool(ok) != self._on:
+            self._on = bool(ok)
+            self.update()
+
+    def paintEvent(self, e: QtGui.QPaintEvent):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        col = self._color_on if self._on else self._color_off
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
+        p.setBrush(col)
+        r = self.rect().adjusted(0,0,-1,-1)
+        d = min(r.width(), r.height())
+        x = (r.width()-d)//2
+        y = (r.height()-d)//2
+        p.drawEllipse(x, y, d, d)
+class Switch(QtWidgets.QCheckBox):
+    """Simple styled toggle switch."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setTristate(False)
+        self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.setFixedSize(46, 24)
+        self.setStyleSheet("""
+            QCheckBox::indicator { width:46px; height:24px; }
+            QCheckBox::indicator:unchecked {
+                border-radius:12px; background: rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.2);
+            }
+            QCheckBox::indicator:checked {
+                border-radius:12px; background: rgba(80,160,255,0.55); border:1px solid rgba(80,160,255,0.8);
+            }
+            QCheckBox::indicator:unchecked:hover { background: rgba(255,255,255,0.18); }
+            QCheckBox::indicator:checked:hover   { background: rgba(80,160,255,0.7); }
+        """)
+
+    def paintEvent(self, e):
+        # Draw pill + knob
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect().adjusted(1,1,-1,-1)
+        on = self.isChecked()
+        bg = QtGui.QColor(80,160,255,160) if on else QtGui.QColor(255,255,255,30)
+        border = QtGui.QColor(80,160,255,200) if on else QtGui.QColor(255,255,255,60)
+        p.setPen(QtGui.QPen(border, 1))
+        p.setBrush(bg)
+        p.drawRoundedRect(rect, 12, 12)
+        # Knob
+        w = rect.height() - 4
+        x = rect.right()-w-2 if on else rect.left()+2
+        knob = QtCore.QRect(x, rect.top()+2, w, w)
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
+        p.setBrush(QtGui.QColor(240,240,240))
+        p.drawEllipse(knob)
+
+class QuickStatus(QtWidgets.QFrame):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.suite = None
+        v = QtWidgets.QVBoxLayout(self); v.setContentsMargins(0,0,0,0); v.setSpacing(10)
+
+        def row(label_text, has_switch=True, switch_tooltip=""):
+            w = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(w)
+            h.setContentsMargins(10,6,10,6); h.setSpacing(10)
+            led = StatusBadge(w)
+            lab = QtWidgets.QLabel(label_text); lab.setStyleSheet("font-weight:600;")
+            h.addWidget(led); h.addWidget(lab); h.addStretch(1)
+            sw = None
+            if has_switch:
+                sw = Switch(w); 
+                if switch_tooltip: sw.setToolTip(switch_tooltip)
+                h.addWidget(sw)
+            v.addWidget(w)
+            return led, sw
+
+        self.led_irx, self.sw_irx = row("InputRX", True, "Start/Stop InputRX")
+        self.led_cxr, self.sw_cxr = row("CrossXir Overlay Visible", True, "Show/Hide Overlay")
+        self.led_stream, self.sw_stream = row("Streamer Mode (hide from capture)", True, "Enable/Disable Streamer Mode")
+
+        self.sw_irx.toggled.connect(self._toggle_irx)
+        self.sw_cxr.toggled.connect(self._toggle_cxr)
+        self.sw_stream.toggled.connect(self._toggle_stream)
+
+        # Safety resync every 3s (very cheap); game scan routed via background worker in _kick_scan()
+        self._resync = QtCore.QTimer(self); self._resync.timeout.connect(self.refresh_states); self._resync.start(3000)
+        QtCore.QTimer.singleShot(200, self._after_init)
+    def _after_init(self):
+        self._wire_events()
+        self.refresh_states()
+        # background game scan setup
+
+    def _resolve_suite(self):
+        if self.suite and hasattr(self.suite, "inputTab"): return self.suite
+        w = self.parentWidget()
+        seen = set()
+        while w and id(w) not in seen:
+            seen.add(id(w))
+            if hasattr(w, "inputTab") and hasattr(w, "crossTab"):
+                self.suite = w; return w
+            w = w.parentWidget()
+        for t in QtWidgets.QApplication.topLevelWidgets():
+            if hasattr(t, "inputTab") and hasattr(t, "crossTab"):
+                self.suite = t; return t
+        return None
+
+    def _wire_events(self):
+        s = self._resolve_suite()
+        if not s: return
+        # InputRX: tie to its toggleBtn
+        try:
+            s.inputTab.toggleBtn.toggled.connect(lambda on: self.led_irx.set_status(on))
+        except Exception: pass
+        try:
+            s.inputTab.runningChanged.connect(lambda on: (self.led_irx.set_status(on), self.sw_irx.blockSignals(True), self.sw_irx.setChecked(on), self.sw_irx.blockSignals(False), self.refresh_states()))
+        except Exception: pass
+        except Exception: pass
+        # CrossXir: overlay toggle
+        try:
+            s.crossTab.toggleBtn.toggled.connect(lambda vis: self.led_cxr.set_status(vis))
+        except Exception: pass
+        # Streamer Mode: tray/menu action if present
+        try:
+            addons = getattr(s, "__addons", None)
+            if addons and hasattr(addons, "act_stream"):
+                addons.act_stream.toggled.connect(lambda en: self.led_stream.set_status(en))
+        except Exception: pass
+
+        def __init__(self, panel):
+            super().__init__(); self.setAutoDelete(True); self.panel = panel
+        def run(self):
+            ok = False
+            try:
+                import psutil
+                wanted = {"cs2.exe","csgo.exe","valorant.exe","VALORANT-Win64-Shipping.exe","r5apex.exe","ModernWarfare.exe","BlackOps.exe"}
+                for p in psutil.process_iter(attrs=["name"]):
+                    nm = (p.info.get("name") or "").lower()
+                    if nm in wanted: ok = True; break
+            except Exception:
+                ok = False
+            QtCore.QMetaObject.invokeMethod(self.panel, "gameDetected", QtCore.Qt.ConnectionType.QueuedConnection, QtCore.Q_ARG(bool, ok))
+
+    def refresh_states(self):
+        s = self._resolve_suite()
+        if not s: return
+        # InputRX
+        try:
+            running = bool(getattr(s.inputTab, "is_running", lambda: False)())
+            self.led_irx.set_status(running); self.sw_irx.blockSignals(True); self.sw_irx.setChecked(running); self.sw_irx.blockSignals(False)
+        except Exception: pass
+        # CrossXir visible
+        try:
+            vis = hasattr(s.crossTab, "win") and hasattr(s.crossTab.win, "overlay") and s.crossTab.win.overlay.isVisible()
+            self.led_cxr.set_status(bool(vis)); self.sw_cxr.blockSignals(True); self.sw_cxr.setChecked(bool(vis)); self.sw_cxr.blockSignals(False)
+        except Exception: pass
+        # Streamer mode (enabled = hidden from capture) → your request: green when enabled
+        try:
+            addons = getattr(s, "__addons", None)
+            en = bool(getattr(addons, "streamer_mode", False)) if addons else False
+            self.led_stream.set_status(en); self.sw_stream.blockSignals(True); self.sw_stream.setChecked(en); self.sw_stream.blockSignals(False)
+        except Exception: pass
+    def _toggle_irx(self, on: bool):
+        s = self._resolve_suite(); tab = getattr(s, 'inputTab', None)
+        if not tab: return
+        try:
+            if bool(tab.toggleBtn.isChecked()) != bool(on):
+                tab.toggleBtn.click()
+        except Exception as e:
+            try:
+                QtWidgets.QMessageBox.warning(self, 'InputRX', f'Failed to toggle: {e}')
+            except Exception:
+                pass
+        self.refresh_states()
+    def _toggle_cxr(self, on: bool):
+        s = self._resolve_suite(); tab = getattr(s, 'crossTab', None)
+        if not tab: return
+        try:
+            if bool(tab.toggleBtn.isChecked()) != bool(on):
+                tab.toggleBtn.click()
+        except Exception as e:
+            try:
+                QtWidgets.QMessageBox.warning(self, 'CrossXir', f'Failed to toggle: {e}')
+            except Exception:
+                pass
+        self.refresh_states()
+
+    def _toggle_stream(self, on: bool):
+        s = self._resolve_suite()
+        addons = getattr(s, "__addons", None) if s else None
+        if addons and hasattr(addons, "_set_streamer_mode"):
+            addons._set_streamer_mode(bool(on))
+            if hasattr(addons, "act_stream"):
+                addons.act_stream.blockSignals(True); addons.act_stream.setChecked(bool(on)); addons.act_stream.blockSignals(False)
+
+    def _resolve_suite(self):
+        # Try cached
+        if self.suite is not None and hasattr(self.suite, "inputTab") and hasattr(self.suite, "crossTab"):
+            return self.suite
+        # Walk parents
+        w = self.parentWidget()
+        visited = set()
+        while w and id(w) not in visited:
+            visited.add(id(w))
+            if hasattr(w, "inputTab") and hasattr(w, "crossTab"):
+                self.suite = w
+                return self.suite
+            w = w.parentWidget()
+        # Fallback: scan all top-level widgets
+        for w in QtWidgets.QApplication.topLevelWidgets():
+            if hasattr(w, "inputTab") and hasattr(w, "crossTab"):
+                self.suite = w
+                return self.suite
+        return None
+
+    def _addons(self):
+        s = self._resolve_suite()
+        if not s: return None
+        for name in ("__addons", "_SuiteWindow__addons", "__addons__"):
+            if hasattr(s, name):
+                return getattr(s, name)
+        return None
+    def _toggle_irx(self, on: bool):
+        s = self._resolve_suite(); tab = getattr(s, 'inputTab', None)
+        if not tab: return
+        try:
+            if bool(tab.toggleBtn.isChecked()) != bool(on):
+                tab.toggleBtn.click()
+        except Exception as e:
+            try:
+                QtWidgets.QMessageBox.warning(self, 'InputRX', f'Failed to toggle: {e}')
+            except Exception:
+                pass
+        self.refresh_states()
+    def _toggle_cxr(self, on: bool):
+        s = self._resolve_suite(); tab = getattr(s, 'crossTab', None)
+        if not tab: return
+        try:
+            if bool(tab.toggleBtn.isChecked()) != bool(on):
+                tab.toggleBtn.click()
+        except Exception as e:
+            try:
+                QtWidgets.QMessageBox.warning(self, 'CrossXir', f'Failed to toggle: {e}')
+            except Exception:
+                pass
+        self.refresh_states()
+
+    def _toggle_stream(self, on: bool):
+        try:
+            addons = getattr(self.suite, "_SuiteWindow__addons", None) or getattr(self.suite, "_SuiteWindow__addons__", None) or getattr(self.suite, "__addons", None)
+            if addons and hasattr(addons, "_set_streamer_mode"):
+                addons._set_streamer_mode(on)
+                # Keep tray checkbox in sync if exists
+                if hasattr(addons, "act_stream"):
+                    addons.act_stream.blockSignals(True)
+                    addons.act_stream.setChecked(on)
+                    addons.act_stream.blockSignals(False)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Streamer Mode", f"Failed to toggle: {e}")
+        self.refresh()
+
+    def _game_running(self) -> bool:
+        # Detect common shooters; can be edited to fit your library
+        procs = ["cs2.exe", "csgo.exe", "ModernWarfare.exe", "BlackOps.exe", "valorant.exe", "VALORANT-Win64-Shipping.exe", "r5apex.exe"]
+        try:
+            import psutil
+        except Exception:
+            return False
+        try:
+            for p in psutil.process_iter(attrs=["name"]):
+                nm = (p.info.get("name") or "").lower()
+                if nm in [x.lower() for x in procs]:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def refresh(self):
+        # Game LED
+        run = self._game_running()
+
+        # InputRX LED + switch state
+        try:
+            s = self._resolve_suite()
+            irx_running = bool(getattr(getattr(s, "inputTab", None), "manager", None) is not None) if s else False
+        except Exception:
+            irx_running = False
+        self.led_irx.set_status(irx_running)
+        self.sw_irx.blockSignals(True); self.sw_irx.setChecked(irx_running); self.sw_irx.blockSignals(False)
+
+        # CrossXir LED + switch state (green if visible)
+        try:
+            visible = True
+            if s and hasattr(getattr(s,"crossTab",None), "win") and hasattr(s.crossTab.win, "overlay"):
+                visible = self.suite.crossTab.win.overlay.isVisible()
+        except Exception:
+            visible = False
+        self.led_cxr.set_status(visible)
+        self.sw_cxr.blockSignals(True); self.sw_cxr.setChecked(visible); self.sw_cxr.blockSignals(False)
+
+        # Streamer Mode LED + switch state (green if enabled)
+        try:
+            addons = self._addons()
+            enabled = bool(getattr(addons, "streamer_mode", False))
+        except Exception:
+            enabled = False
+        # Here, green means ENABLED as you requested
+        self.led_stream.set_status(enabled)
+        self.sw_stream.blockSignals(True); self.sw_stream.setChecked(enabled); self.sw_stream.blockSignals(False)
+
+class SectionHeader(QtWidgets.QLabel):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setStyleSheet("font-size:16px; font-weight:800; margin: 6px 2px;")
+
+class FlatBar(QtWidgets.QFrame):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+
+# ------------------------- Functional Tabs (unchanged behavior) -------------------------
+
+
+class InputRXSubTab(QtWidgets.QWidget):
+    
+    runningChanged = QtCore.pyqtSignal(bool)
+
+    def set_perf_mode(self, on: bool):
+        # Reduce hover/mouse tracking on heavy widgets to cut event traffic
+        try:
+            for name in ('stickViz','debugViz','stickThrBar','trigViz'):
+                w = getattr(self.win, name, None)
+                if w is not None:
+                    w.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, not on)
+                    w.setMouseTracking(not on)
+        except Exception:
+            pass
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        bar = FlatBar(); hb = QtWidgets.QHBoxLayout(bar); hb.setContentsMargins(0,0,0,0); hb.setSpacing(8)
+        self.toggleBtn = QtWidgets.QPushButton("Stop InputRX"); self.toggleBtn.setCheckable(True); self.toggleBtn.setChecked(True); self.toggleBtn.setFixedHeight(28)
+        self.statusLbl = QtWidgets.QLabel("running"); self.statusLbl.setStyleSheet("font-weight:600;")
+        hb.addWidget(self.toggleBtn); hb.addWidget(self.statusLbl); hb.addStretch(1)
+
+        self.cfg = inputrx.load_config(inputrx.CONFIG_PATH)
+        self.bus = inputrx.InputSample()
+        self.win = inputrx.MainWindow(self.cfg)
+        self._external = False
+        self._proc = None
+        self.manager = inputrx.WorkerManager(self.cfg, self.bus, self.win)
+        self.manager.start()
+
+        self.win.applyConfig.connect(self.manager.apply_to_worker)
+        self.bus.updated.connect(self.win.stickViz.on_sample, QtCore.Qt.ConnectionType.QueuedConnection)
+        self.bus.status.connect(self.win.statusLabel.setText, QtCore.Qt.ConnectionType.QueuedConnection)
+        self.bus.triggers.connect(self.win.trigViz.on_triggers, QtCore.Qt.ConnectionType.QueuedConnection)
+        self.bus.updated.connect(self.win.stickThrBar.on_sample, QtCore.Qt.ConnectionType.QueuedConnection)
+        self.bus.updated.connect(self.win.debugViz.on_sample, QtCore.Qt.ConnectionType.QueuedConnection)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        topWrap = QtWidgets.QWidget(); tw = QtWidgets.QVBoxLayout(topWrap); tw.setContentsMargins(0,0,0,0); tw.addWidget(bar)
+        splitter.addWidget(topWrap); splitter.addWidget(self.win); splitter.setSizes([36, 10000])
+
+        root = QtWidgets.QVBoxLayout(self); root.setContentsMargins(8,8,8,8); root.setSpacing(8); root.addWidget(splitter)
+        self.toggleBtn.toggled.connect(self._on_toggled)
+
+    
+        if not self.toggleBtn.isChecked(): self.toggleBtn.setChecked(True)
+        if not self.toggleBtn.isChecked(): self.toggleBtn.setChecked(True)
+    def _on_toggled(self, checked: bool):
+        if checked:
+            if self.manager is None:
+                try:
+                    self.manager = inputrx.WorkerManager(self.cfg, self.bus, self.win)
+                    self.manager.start()
+                    self.win.applyConfig.connect(self.manager.apply_to_worker)
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(self, "InputRX", f"Failed to start worker:\n{e}")
+                    self.manager = None; self.toggleBtn.setChecked(False); self.statusLbl.setText("stopped"); self.runningChanged.emit(False); return
+            self.toggleBtn.setText("Stop InputRX"); self.statusLbl.setText("running"); self.runningChanged.emit(True)
+        else:
+            try:
+                if self.manager is not None: self.manager.stop()
+            except Exception:
+                pass
+            self.manager = None; self.toggleBtn.setText("Start InputRX"); self.statusLbl.setText("stopped"); self.runningChanged.emit(False)
+
+    def shutdown(self):
+        self.runningChanged.emit(False)
+        try:
+            if self.manager is not None: self.manager.stop()
+        except Exception:
+            pass
+
+
+
+    def is_running(self) -> bool:
+        if self.is_external_mode():
+            p = getattr(self, "_proc", None)
+            return bool(p and p.poll() is None)
+        return bool(getattr(self, "manager", None) is not None)
+
+
+class CrossXirSubTab(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        bar = FlatBar(); hb = QtWidgets.QHBoxLayout(bar); hb.setContentsMargins(0,0,0,0); hb.setSpacing(8)
+        self.toggleBtn = QtWidgets.QPushButton("Hide Overlay"); self.toggleBtn.setCheckable(True); self.toggleBtn.setChecked(True); self.toggleBtn.setFixedHeight(28)
+        self.statusLbl = QtWidgets.QLabel("overlay: visible"); self.statusLbl.setStyleSheet("font-weight:600;")
+        hb.addWidget(self.toggleBtn); hb.addWidget(self.statusLbl); hb.addStretch(1)
+
+        self.win = crossxir.MainWindow()
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        topWrap = QtWidgets.QWidget(); tw = QtWidgets.QVBoxLayout(topWrap); tw.setContentsMargins(0,0,0,0); tw.addWidget(bar)
+        splitter.addWidget(topWrap); splitter.addWidget(self.win); splitter.setSizes([36, 10000])
+
+        root = QtWidgets.QVBoxLayout(self); root.setContentsMargins(8,8,8,8); root.setSpacing(8); root.addWidget(splitter)
+        self.toggleBtn.toggled.connect(self._on_toggled)
+
+    
+        if not self.toggleBtn.isChecked(): self.toggleBtn.setChecked(True)
+        if not self.toggleBtn.isChecked(): self.toggleBtn.setChecked(True)
+    def _on_toggled(self, checked: bool):
+        try:
+            if hasattr(self.win, "overlay"):
+                if checked:
+                    self.win.overlay.show(); self.toggleBtn.setText("Hide Overlay"); self.statusLbl.setText("overlay: visible")
+                else:
+                    self.win.overlay.hide(); self.toggleBtn.setText("Show Overlay"); self.statusLbl.setText("overlay: hidden")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "CrossXir", f"Overlay toggle problem:\n{e}")
+
+    def shutdown(self):
+        try:
+            if hasattr(self.win, "overlay"): self.win.overlay.hide()
+        except Exception:
+            pass
+
+class LauncherModel(QtCore.QAbstractTableModel):
+    COLS = ["Name", "Path", "Args", "Status"]
+    def __init__(self, data: list, pids_ref: dict, parent=None):
+        super().__init__(parent)
+        self._data = data
+        self._pids = pids_ref
+
+    def rowCount(self, parent=QtCore.QModelIndex()): return len(self._data)
+    def columnCount(self, parent=QtCore.QModelIndex()): return len(self.COLS)
+    def data(self, index, role=QtCore.Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or role not in (QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.ToolTipRole): return None
+        r, c = index.row(), index.column()
+        it = self._data[r]
+        if c == 0: v = it.get("name","")
+        elif c == 1: v = it.get("path","")
+        elif c == 2: v = it.get("args","")
+        else: v = "running" if it.get("name","") in self._pids else "stopped"
+        return v
+    def headerData(self, section, orientation, role=QtCore.Qt.ItemDataRole.DisplayRole):
+        if role != QtCore.Qt.ItemDataRole.DisplayRole: return None
+        if orientation == QtCore.Qt.Orientation.Horizontal: return self.COLS[section]
+        return str(section+1)
+    def flags(self, index):
+        if not index.isValid(): return QtCore.Qt.ItemFlag.NoItemFlags
+        return (QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled)
+    def addRow(self, it: dict):
+        self.beginInsertRows(QtCore.QModelIndex(), len(self._data), len(self._data))
+        self._data.append(it)
+        self.endInsertRows()
+    def removeRowAt(self, row: int):
+        if 0 <= row < len(self._data):
+            self.beginRemoveRows(QtCore.QModelIndex(), row, row)
+            self._data.pop(row)
+            self.endRemoveRows()
+    def updateAll(self): self.beginResetModel(); self.endResetModel()
+    def bumpStatus(self):
+        if not self._data: return
+        tl = self.index(0, 3); br = self.index(len(self._data)-1, 3)
+        self.dataChanged.emit(tl, br, [QtCore.Qt.ItemDataRole.DisplayRole])
+
+class LauncherTab(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.data = []
+        self.pids = {}
+        self._build_ui()
+        self._load()
+        self._status_timer = QtCore.QTimer(self)
+        self._status_timer.timeout.connect(self._refresh_status)
+        self._status_timer.start(1500)
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self); layout.setContentsMargins(8,8,8,8); layout.setSpacing(8)
+        ctr = QtWidgets.QHBoxLayout()
+        self.addBtn = QtWidgets.QPushButton("Add")
+        self.editBtn = QtWidgets.QPushButton("Edit")
+        self.delBtn = QtWidgets.QPushButton("Delete")
+        self.runBtn = QtWidgets.QPushButton("Launch")
+        self.stopBtn = QtWidgets.QPushButton("Stop")
+        for b in (self.addBtn, self.editBtn, self.delBtn, self.runBtn, self.stopBtn): b.setFixedHeight(28)
+        ctr.addWidget(self.addBtn); ctr.addWidget(self.editBtn); ctr.addWidget(self.delBtn); ctr.addStretch(1); ctr.addWidget(self.runBtn); ctr.addWidget(self.stopBtn)
+        layout.addLayout(ctr)
+
+        self.model = LauncherModel(self.data, self.pids, self)
+        self.table = QtWidgets.QTableView(); self.table.setModel(self.model)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True); self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, 1)
+
+        self.addBtn.clicked.connect(self._add_item); self.editBtn.clicked.connect(self._edit_item)
+        self.delBtn.clicked.connect(self._delete_item); self.runBtn.clicked.connect(self._launch_selected)
+        self.stopBtn.clicked.connect(self._stop_selected)
+
+    def _refresh_table(self):
+        self.model.updateAll(); self.table.resizeColumnsToContents()
+
+    @QtCore.pyqtSlot()
+    def _refresh_status(self):
+        if self.pids:
+            if psutil:
+                for name, pid in list(self.pids.items()):
+                    try:
+                        if not psutil.pid_exists(pid): self.pids.pop(name, None)
+                    except Exception:
+                        self.pids.pop(name, None)
+            else:
+                for name, pid in list(self.pids.items()):
+                    try: os.kill(pid, 0)
+                    except Exception: self.pids.pop(name, None)
+        self.model.bumpStatus()
+
+    def _add_item(self):
+        dlg = QtWidgets.QDialog(self); dlg.setWindowTitle("Add Launcher Item")
+        form = QtWidgets.QFormLayout(dlg)
+        name = QtWidgets.QLineEdit(); path = QtWidgets.QLineEdit(); args = QtWidgets.QLineEdit(); cwd  = QtWidgets.QLineEdit()
+        browse = QtWidgets.QPushButton("Browse…")
+        def pick():
+            f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select executable", "", "Programs (*.exe *.bat *.cmd);;All Files (*)")
+            if f: path.setText(f)
+        browse.clicked.connect(pick)
+        path_row = QtWidgets.QHBoxLayout(); path_row.addWidget(path); path_row.addWidget(browse)
+        form.addRow("Name", name); wrap = QtWidgets.QWidget(); wrap.setLayout(path_row); form.addRow("Path", wrap)
+        form.addRow("Args", args); form.addRow("Working Dir", cwd)
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        form.addRow(btns); btns.accepted.connect(dlg.accept); btns.rejected.connect(dlg.reject)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            it = {"name": name.text().strip(), "path": path.text().strip(), "args": args.text().strip(), "cwd": cwd.text().strip()}
+            if not it["name"] or not it["path"]: QtWidgets.QMessageBox.warning(self, "Launcher", "Name and Path are required."); return
+            self.model.addRow(it); self._save(); self._refresh_table()
+
+    def _edit_item(self):
+        idxs = self.table.selectionModel().selectedRows()
+        if not idxs: return
+        row = idxs[0].row(); cur = dict(self.data[row])
+        dlg = QtWidgets.QDialog(self); dlg.setWindowTitle("Edit Launcher Item")
+        form = QtWidgets.QFormLayout(dlg)
+        name = QtWidgets.QLineEdit(cur.get("name","")); path = QtWidgets.QLineEdit(cur.get("path","")); args = QtWidgets.QLineEdit(cur.get("args","")); cwd  = QtWidgets.QLineEdit(cur.get("cwd",""))
+        browse = QtWidgets.QPushButton("Browse…")
+        def pick():
+            f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select executable", "", "Programs (*.exe *.bat *.cmd);;All Files (*)")
+            if f: path.setText(f)
+        browse.clicked.connect(pick)
+        path_row = QtWidgets.QHBoxLayout(); path_row.addWidget(path); path_row.addWidget(browse)
+        form.addRow("Name", name); wrap = QtWidgets.QWidget(); wrap.setLayout(path_row); form.addRow("Path", wrap)
+        form.addRow("Args", args); form.addRow("Working Dir", cwd)
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        form.addRow(btns); btns.accepted.connect(dlg.accept); btns.rejected.connect(dlg.reject)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            cur.update({"name": name.text().strip(), "path": path.text().strip(), "args": args.text().strip(), "cwd": cwd.text().strip()})
+            if not cur["name"] or not cur["path"]: QtWidgets.QMessageBox.warning(self, "Launcher", "Name and Path are required."); return
+            self.data[row] = cur; self._save(); self._refresh_table()
+
+    def _delete_item(self):
+        idxs = self.table.selectionModel().selectedRows()
+        if not idxs: return
+        row = idxs[0].row(); it = self.data[row]
+        if QtWidgets.QMessageBox.question(self, "Delete", f"Delete '{it.get('name','')}'?") == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.model.removeRowAt(row); self._save(); self._refresh_table()
+
+    def _conf_path(self):
+        try:
+            base = DIRS.get("config") or os.path.join(APP_DIR, "config"); os.makedirs(base, exist_ok=True)
+        except Exception:
+            base = APP_DIR
+        return os.path.join(base, "launcher_data.json")
+
+    def _load(self):
+        try:
+            with open(self._conf_path(), "r", encoding="utf-8") as f: self.data[:] = json.load(f)
+        except Exception:
+            self.data[:] = []
+        self._refresh_table()
+
+    def _save(self):
+        try:
+            with open(self._conf_path(), "w", encoding="utf-8") as f: json.dump(self.data, f, indent=2)
+        except Exception as e:
+            print("Failed to save launcher data:", e)
+
+    def _launch_selected(self):
+        idxs = self.table.selectionModel().selectedRows()
+        if not idxs: return
+        self.launch_item(self.data[idxs[0].row()])
+
+    def _stop_selected(self):
+        idxs = self.table.selectionModel().selectedRows()
+        if not idxs: return
+        self.stop_item(self.data[idxs[0].row()])
+
+    def launch_item(self, it: Dict):
+        name = it.get("name","")
+        if name in self.pids:
+            QtWidgets.QMessageBox.information(self, "Launcher", f"{name} is already running."); return
+        path = it.get("path",""); args = it.get("args",""); cwd = it.get("cwd","") or None
+        if not os.path.exists(path):
+            QtWidgets.QMessageBox.warning(self, "Launcher", f"Path does not exist:\\n{path}"); return
+        try:
+            cmd = [path] + (shlex.split(args) if args else [])
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.Popen(cmd, cwd=cwd, creationflags=flags, close_fds=False)
+            self.pids[name] = proc.pid
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Launcher", f"Failed to launch:\\n{e}")
+        self._refresh_status(); self._refresh_table()
+
+    def stop_item(self, it: Dict):
+        name = it.get("name",""); pid = self.pids.get(name)
+        if not pid:
+            QtWidgets.QMessageBox.information(self, "Launcher", f"{name} not running."); return
+        try:
+            if psutil:
+                p = psutil.Process(pid)
+                for ch in p.children(recursive=True):
+                    try: ch.terminate()
+                    except Exception: pass
+                p.terminate()
+                try: p.wait(2)
+                except Exception: pass
+                if p.is_running(): p.kill()
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Launcher", f"Failed to stop:\\n{e}")
+        self.pids.pop(name, None); self._refresh_status(); self._refresh_table()
+
+class StreamerTab(QtWidgets.QWidget):
+    def __init__(self, addons, parent=None):
+        super().__init__(parent)
+        self.addons = addons
+        v = QtWidgets.QVBoxLayout(self); v.setContentsMargins(12,12,12,12); v.setSpacing(12)
+        title = QtWidgets.QLabel("Streamer Mode"); title.setStyleSheet("font-size:16px; font-weight:700;")
+        desc = QtWidgets.QLabel("Hide CrossXir overlay from screenshots & recordings while keeping it visible to you.\\nRequires Windows 10 2004+ / Windows 11."); desc.setWordWrap(True)
+        self.chk = QtWidgets.QCheckBox("Enable Streamer Mode (exclude overlay from capture)")
+        self.chk.setChecked(False); self.chk.toggled.connect(self.on_toggled)
+        v.addWidget(title); v.addWidget(desc); v.addWidget(self.chk); v.addStretch(1)
+
+    def on_toggled(self, enabled: bool):
+        if hasattr(self.addons, "_set_streamer_mode"):
+            self.addons._set_streamer_mode(enabled)
+            if hasattr(self.addons, "act_stream"):
+                self.addons.act_stream.blockSignals(True); self.addons.act_stream.setChecked(enabled); self.addons.act_stream.blockSignals(False)
+
+class DriftLabTab(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.running = False; self.duration_ms = 10000; self.elapsed = 0
+        self.score_history = []; self.path = []; self.target = "circle"
+        self._timer = QtCore.QTimer(self); self._timer.timeout.connect(self._tick)
+
+        top = QtWidgets.QHBoxLayout(); top.setContentsMargins(0,0,0,0); top.setSpacing(8)
+        self.startBtn = QtWidgets.QPushButton("Start 10s"); self.resetBtn = QtWidgets.QPushButton("Reset")
+        self.modeBox = QtWidgets.QComboBox(); self.modeBox.addItems(["Circle", "Line", "Targets", "Aim Pop"])
+        self.durSpin = QtWidgets.QSpinBox(); self.durSpin.setRange(10, 60); self.durSpin.setValue(10); self.durSpin.setSuffix(" s")
+        self.paceSpin = QtWidgets.QSpinBox(); self.paceSpin.setRange(200, 2000); self.paceSpin.setSingleStep(50); self.paceSpin.setValue(900); self.paceSpin.setSuffix(" ms")
+        self.infoLbl = QtWidgets.QLabel("Idle"); self.scoreLbl = QtWidgets.QLabel("Score: 0 | Acc: 0% | Left: 10s")
+        for w in (self.startBtn, self.resetBtn, self.modeBox): w.setFixedHeight(28)
+        top.addWidget(self.startBtn); top.addWidget(self.resetBtn); top.addWidget(QtWidgets.QLabel("Mode:")); top.addWidget(self.modeBox)
+        top.addWidget(QtWidgets.QLabel("Time:")); top.addWidget(self.durSpin); top.addWidget(QtWidgets.QLabel("Pace:")); top.addWidget(self.paceSpin); top.addStretch(1); top.addWidget(self.infoLbl); top.addWidget(self.scoreLbl)
+
+        self.canvas = QtWidgets.QFrame(); self.canvas.setFrameShape(QtWidgets.QFrame.Shape.NoFrame); self.canvas.setMinimumHeight(340)
+        root = QtWidgets.QVBoxLayout(self); root.setContentsMargins(8,8,8,8); root.setSpacing(8); root.addLayout(top); root.addWidget(self.canvas, 1)
+
+        self.startBtn.clicked.connect(self.start); self.resetBtn.clicked.connect(self.reset); self.modeBox.currentTextChanged.connect(self._set_mode)
+        self._last_mouse = None; self._crosshair = None
+        try:
+            self.durSpin.setEnabled(False); self.paceSpin.setEnabled(False)
+        except Exception: pass
+        self.pop_targets = []; self.pop_radius = 16; self.pop_spawn_ms = 900; self.pop_last_spawn = 0; self.pop_hits = 0; self.pop_shots = 0
+
+    def _set_mode(self, m):
+        self.target = m.lower()
+        if self.target == 'aim pop':
+            self.pop_targets.clear(); self.pop_hits = 0; self.pop_shots = 0
+            try: self.durSpin.setEnabled(True); self.paceSpin.setEnabled(True)
+            except Exception: pass
+        else:
+            try: self.durSpin.setEnabled(False); self.paceSpin.setEnabled(False)
+            except Exception: pass
+        self.update()
+
+    def start(self):
+        if self.running: return
+        self.running = True; self.elapsed = 0; self.path.clear(); self.score_history.clear()
+        if self.target == 'aim pop':
+            self.pop_targets.clear(); self.pop_hits = 0; self.pop_shots = 0; self.pop_last_spawn = 0
+            try:
+                self.duration_ms = int(self.durSpin.value()) * 1000; self.pop_spawn_ms = int(self.paceSpin.value())
+            except Exception: pass
+            self._schedule_spawn()
+        self._timer.start(16); self.infoLbl.setText("Running…")
+
+    def reset(self):
+        self.running = False; self._timer.stop(); self.elapsed = 0; self.path.clear(); self.update(); self.infoLbl.setText("Idle")
+
+    def _tick(self):
+        self.elapsed += 16
+        if self.target == 'aim pop' and self.running:
+            acc = (self.pop_hits / self.pop_shots * 100.0) if self.pop_shots else 0.0
+            left = max(0, (self.duration_ms - self.elapsed)//1000)
+            self.scoreLbl.setText(f"Score: {self.pop_hits} | Acc: {acc:.0f}% | Left: {left}s")
+        if self.elapsed >= self.duration_ms:
+            self.running = False; self._timer.stop()
+            if self.target == 'aim pop':
+                acc = (self.pop_hits / self.pop_shots * 100.0) if self.pop_shots else 0.0
+                self.infoLbl.setText(f"Hits: {self.pop_hits}  Acc: {acc:.0f}%")
+            else:
+                score = self._compute_score(); self.infoLbl.setText(f"Score (lower=better): {score:.2f}")
+        self.update()
+
+    def _schedule_spawn(self):
+        if not getattr(self, "_spawn_timer", None):
+            self._spawn_timer = QtCore.QTimer(self); self._spawn_timer.setSingleShot(True); self._spawn_timer.timeout.connect(self._on_spawn_timeout)
+        if self.running and self.target == 'aim pop': self._spawn_timer.start(int(self.pop_spawn_ms))
+
+    @QtCore.pyqtSlot()
+    def _on_spawn_timeout(self): 
+        if not self.running or self.target != 'aim pop': return
+        self._spawn_pop_target(); self._schedule_spawn()
+
+    def _spawn_pop_target(self):
+        rect = self.canvas.rect(); margin = self.pop_radius + 8; import random
+        w = max(0, rect.width() - margin*2); h = max(0, rect.height() - margin*2)
+        x = (margin + random.randint(0, w)) if w > 0 else rect.center().x()
+        y = (margin + random.randint(0, h)) if h > 0 else rect.center().y()
+        self.pop_targets.append({'pos': QtCore.QPointF(x, y), 'r': self.pop_radius})
+        if len(self.pop_targets) > 4: self.pop_targets.pop(0)
+
+    def mousePressEvent(self, ev: QtGui.QMouseEvent):
+        if self.target != 'aim pop' or not self.running: return
+        canvas_rect = self.canvas.geometry()
+        if not canvas_rect.contains(ev.position().toPoint()): return
+        click = ev.position() - QtCore.QPointF(canvas_rect.x(), canvas_rect.y())
+        self.pop_shots += 1
+        hit_idx = None
+        for i, t in enumerate(self.pop_targets):
+            d = ((click.x()-t['pos'].x())**2 + (click.y()-t['pos'].y())**2)**0.5
+            if d <= t['r']: hit_idx = i; break
+        if hit_idx is not None:
+            self.pop_hits += 1; self.pop_targets.pop(hit_idx)
+
+    def mouseMoveEvent(self, ev: QtGui.QMouseEvent):
+        if not self.running: return
+        canvas_rect = self.canvas.geometry()
+        if canvas_rect.contains(ev.position().toPoint()):
+            self._crosshair = ev.position() - QtCore.QPointF(canvas_rect.x(), canvas_rect.y())
+        if self.target == 'aim pop':
+            self.update(); return
+        if canvas_rect.contains(ev.position().toPoint()):
+            pt = ev.position().toPoint()
+            if not self.path or (abs(pt.x()-self.path[-1].x()) + abs(pt.y()-self.path[-1].y())) >= 1:
+                self.path.append(pt)
+        self.update()
+
+    def _ideal_point(self, tfrac: float, rect: QtCore.QRect):
+        if self.target == "circle":
+            r = min(rect.width(), rect.height()) * 0.35; cx, cy = rect.center().x(), rect.center().y()
+            ang = 2*3.14159*tfrac; return QtCore.QPointF(cx + r*math.cos(ang), cy + r*math.sin(ang))
+        elif self.target == "line":
+            y = rect.center().y(); x = rect.left() + rect.width() * tfrac; return QtCore.QPointF(x, y)
+        else:
+            pts = [rect.center() + QtCore.QPoint(int(rect.width()*0.3), 0),
+                   rect.center() + QtCore.QPoint(0, int(-rect.height()*0.3)),
+                   rect.center() + QtCore.QPoint(int(-rect.width()*0.3), 0),
+                   rect.center() + QtCore.QPoint(0, int(rect.height()*0.3))]
+            idx = int(tfrac*len(pts)) % len(pts); return QtCore.QPointF(pts[idx])
+
+    def _compute_score(self):
+        if not self.path: return 0.0
+        rect = self.canvas.rect(); n = len(self.path)
+        ideals = [self._ideal_point(i / max(1, n-1), rect) for i in range(n)]
+        total = 0.0
+        for (pt, ideal) in zip(self.path, ideals): total += math.hypot(pt.x()-ideal.x(), pt.y()-ideal.y())
+        return total / n
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QtGui.QPainter(self); p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        rect = self.canvas.geometry(); p.translate(rect.x(), rect.y()); r = QtCore.QRect(0,0,rect.width(),rect.height())
+        p.fillRect(r, QtGui.QColor(24,24,24,120))
+        if self.target == 'aim pop':
+            p.setBrush(QtGui.QColor(80,200,170,230)); p.setPen(QtGui.QPen(QtGui.QColor(30,120,100,220), 2))
+            for t in self.pop_targets:
+                rr = int(t['r']); cx = int(t['pos'].x()); cy = int(t['pos'].y())
+                p.drawEllipse(QtCore.QRect(cx-rr, cy-rr, rr*2, rr*2))
+            if self.running and getattr(self, "_crosshair", None) is not None:
+                chx, chy = int(self._crosshair.x()), int(self._crosshair.y())
+                p.setPen(QtGui.QPen(QtGui.QColor(255,255,255,230), 1)); p.drawLine(chx-10, chy, chx+10, chy); p.drawLine(chx, chy-10, chx, chy+10)
+                p.setPen(QtGui.QPen(QtGui.QColor(0,0,0,180), 1)); p.drawEllipse(QtCore.QRect(chx-3, chy-3, 6, 6))
+        else:
+            tfrac = (self.elapsed % self.duration_ms)/self.duration_ms if self.duration_ms else 0.0
+            ideal = self._ideal_point(tfrac, r)
+            pen = QtGui.QPen(QtGui.QColor(100,100,255,180)); pen.setWidth(2); p.setPen(pen)
+            if self.target == "circle":
+                radius = int(min(r.width(), r.height())*0.35); p.drawEllipse(r.center(), radius, radius)
+            elif self.target == "line":
+                p.drawLine(r.left()+10, r.center().y(), r.right()-10, r.center().y())
+            else:
+                for pt in [self._ideal_point(k/4.0, r) for k in range(4)]:
+                    p.drawEllipse(QtCore.QRectF(pt.x()-6, pt.y()-6, 12, 12))
+            p.setBrush(QtGui.QColor(255,255,255)); p.drawEllipse(QtCore.QRectF(ideal.x()-3, ideal.y()-3, 6, 6))
+        if self.path:
+            p.setPen(QtGui.QPen(QtGui.QColor(200,200,200,200), 2))
+            for i in range(1, len(self.path)):
+                p.drawLine(self.path[i-1] - QtCore.QPoint(rect.x(), rect.y()), self.path[i] - QtCore.QPoint(rect.x(), rect.y()))
+
+class UWPLaunchSubTab(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.win = uwplauncher.MainWindow()
+        lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(8,8,8,8); lay.setSpacing(8); lay.addWidget(self.win)
+    def shutdown(self):
+        try:
+            if hasattr(self.win, "worker") and self.win.worker is not None: self.win.worker.terminate()
+        except Exception: pass
+
+# ------------------------- Navigation Landing Page -------------------------
+
+class NavigationHome(QtWidgets.QWidget):
+    """Landing page with tiles that navigate to tabs, styled like the screenshot."""
+    def __init__(self, goto_fn, parent=None):
+        super().__init__(parent)
+        self.goto = goto_fn
+        outer = QtWidgets.QVBoxLayout(self); outer.setContentsMargins(16,16,16,16); outer.setSpacing(16)
+
+        nav_header = SectionHeader("Navigation")
+        outer.addWidget(nav_header)
+
+        grid = QtWidgets.QGridLayout(); grid.setHorizontalSpacing(14); grid.setVerticalSpacing(14)
+
+        def add_card(row, col, title, subtitle, key):
+            card = NavCard(title, subtitle, None, self)
+            card.clicked.connect(lambda: self.goto(key))
+            grid.addWidget(card, row, col)
+
+        # Feel free to rename labels; these map to set_page keys.
+        add_card(0, 0, "InputRX", "Input processing & graphing", "InputRX")
+        add_card(0, 1, "CrossXir", "Overlay crosshair controls", "CrossXir")
+        add_card(0, 2, "Launcher", "Start/stop external apps", "Launcher")
+        add_card(1, 0, "Streamer", "Exclude overlay from capture", "Streamer")
+        add_card(1, 1, "Drift Lab", "Mini aim & drift trainer", "Drift")
+        add_card(1, 2, "UWP Launch", "Windows Store game launcher", "UWP Launch")
+
+        outer.addLayout(grid)
+
+        # Optional: Games/Status style row (a single large card)
+        games_header = SectionHeader("Quick Status")
+        outer.addWidget(games_header)
+        self.quick = QuickStatus(self)
+        outer.addWidget(self.quick)
+
+# ------------------------- Addons & Main Window -------------------------
+
+class _SuiteAddons(QtCore.QObject):
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win; self.tray = None; self.streamer_mode = False
+        self.watchdog_timer = QtCore.QTimer(self); self.watchdog_timer.setInterval(1500)
+        self.watchdog_timer.timeout.connect(self._tick_watchdog); self.watchdog_timer.start()
+        self._build_tray(); self._install_menu()
+
+    def _build_tray(self):
+        self.tray = QtWidgets.QSystemTrayIcon(self.win.windowIcon(), self.win)
+        menu = QtWidgets.QMenu()
+        self.act_irx = QtGui.QAction("Stop InputRX", menu, checkable=True); self.act_irx.setChecked(True)
+        self.act_irx.toggled.connect(self._toggle_inputrx); menu.addAction(self.act_irx)
+        self.act_cxr = QtGui.QAction("Hide Overlay", menu, checkable=True); self.act_cxr.setChecked(True)
+        self.act_cxr.toggled.connect(self._toggle_crossxir); menu.addAction(self.act_cxr)
+        menu.addSeparator()
+        self.act_stream = QtGui.QAction("Streamer Mode (hide from capture)", menu, checkable=True)
+        self.act_stream.toggled.connect(self._set_streamer_mode); menu.addAction(self.act_stream)
+        menu.addSeparator()
+        menu.addSeparator()
+        quit_act = QtGui.QAction("Quit", menu); quit_act.triggered.connect(self.win.close); menu.addAction(quit_act)
+        self.tray.setContextMenu(menu); self.tray.show()
+
+    def _install_menu(self):
+        mb = self.win.menuBar(); suite_menu = mb.addMenu("Suite")
+        suite_menu.addAction(self.act_irx); suite_menu.addAction(self.act_cxr); suite_menu.addAction(self.act_stream)
+
+    def _toggle_inputrx(self, running: bool):
+        try:
+            tab = self.win.inputTab
+            if bool(tab.toggleBtn.isChecked()) != bool(running):
+                tab.toggleBtn.blockSignals(True); tab.toggleBtn.setChecked(bool(running)); tab.toggleBtn.blockSignals(False)
+        except Exception: pass
+        self._sync_labels()
+
+    def _toggle_crossxir(self, visible: bool):
+        try:
+            tab = self.win.crossTab
+            if bool(tab.toggleBtn.isChecked()) != bool(visible):
+                tab.toggleBtn.blockSignals(True); tab.toggleBtn.setChecked(bool(visible)); tab.toggleBtn.blockSignals(False)
+        except Exception: pass
+        self._sync_labels()
+
+    def _set_streamer_mode(self, enabled: bool):
+        self.streamer_mode = enabled
+        hwnd = overlay_hwnd(self.win)
+        if hwnd: apply_capture_exclusion(hwnd, enabled)
+
+    def _tick_watchdog(self):
+        try:
+            if self.streamer_mode:
+                hwnd = overlay_hwnd(self.win)
+                if hwnd:
+                    apply_capture_exclusion(hwnd, True)
+        except Exception: pass
+        self._sync_labels()
+
+    def _sync_labels(self):
+        try:
+            self.act_irx.setText("Stop InputRX" if self.act_irx.isChecked() else "Start InputRX")
+            self.act_cxr.setText("Hide Overlay" if self.act_cxr.isChecked() else "Show Overlay")
+        except Exception: pass
+
+def attach_addons(win): win.__addons = _SuiteAddons(win); return win.__addons
+
+class SuiteWindow(QtWidgets.QMainWindow):
+    eventBus = QtCore.pyqtSignal(str)
+    def __init__(self):
+        super().__init__()
+        # Fallback icon so tray always has one
+        if self.windowIcon().isNull():
+            pm = QtGui.QPixmap(32, 32); pm.fill(QtGui.QColor(20, 20, 24))
+            painter = QtGui.QPainter(pm); painter.setPen(QtGui.QPen(QtGui.QColor(80, 160, 255)))
+            painter.setFont(QtGui.QFont("Segoe UI", 14, QtGui.QFont.Weight.Bold)); painter.drawText(pm.rect(), QtCore.Qt.AlignmentFlag.AlignCenter, "IX"); painter.end()
+            self.setWindowIcon(QtGui.QIcon(pm))
+        self.setWindowTitle("InputRX + CrossXir — Suite"); self.resize(1320, 820)
+
+        # Global background polish
+        self.setStyleSheet("""
+            QMainWindow { background: #0f1116; }
+            QMenuBar { background: transparent; color: #ddd; }
+            QMenuBar::item:selected { background: rgba(255,255,255,0.08); }
+            QToolBar { background: rgba(255,255,255,0.03); border: 0; padding: 6px; }
+            QScrollArea { background: transparent; }
+        """)
+
+        # Sidebar
+        self.sidebar_width = 220
+        self.sidebar = QtWidgets.QFrame(); self.sidebar.setFixedWidth(self.sidebar_width); self.sidebar.setMaximumWidth(self.sidebar_width)
+        self.sidebar.setStyleSheet("QFrame { background: transparent; }")
+        sb_layout = QtWidgets.QVBoxLayout(self.sidebar); sb_layout.setContentsMargins(12,12,12,12); sb_layout.setSpacing(8)
+
+        title = QtWidgets.QLabel("Suite"); title.setStyleSheet("font-size:18px; font-weight:800;")
+        sb_layout.addWidget(title)
+
+        def make_btn(text):
+            b = TileButton(text); b.setMinimumHeight(0)
+            b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+            return b
+
+        # New Home/Navigation tab
+        self.btn_home   = make_btn(" Navigation")
+        self.btn_input  = make_btn(" InputRX")
+        self.btn_cross  = make_btn(" CrossXir")
+        self.btn_launch = make_btn(" Launcher")
+        self.btn_stream = make_btn(" Streamer")
+        self.btn_drift  = make_btn(" Drift Lab")
+        self.btn_uwp    = make_btn(" UWP Launch")
+
+        for b in (self.btn_home, self.btn_input, self.btn_cross, self.btn_launch, self.btn_uwp, self.btn_stream, self.btn_drift):
+            sb_layout.addWidget(b)
+
+        sb_layout.addStretch(1)
+
+        # Main stack
+        self.stack = QtWidgets.QStackedWidget()
+        self.inputTab = InputRXSubTab(self.stack)
+        self.crossTab = CrossXirSubTab(self.stack)
+        addons = attach_addons(self)
+        self.streamTab = StreamerTab(addons, self.stack)
+        self.launcherTab = LauncherTab(self.stack)
+        self.driftTab = DriftLabTab(self.stack)
+        self.uwpLaunchTab = UWPLaunchSubTab(self.stack)
+
+        # Home page with navigation tiles
+        self.homeTab = NavigationHome(self.set_page, self.stack)
+
+        for w in (self.homeTab, self.inputTab, self.crossTab, self.launcherTab, self.streamTab, self.driftTab, self.uwpLaunchTab):
+            self.stack.addWidget(w)
+
+        # Pulse bar
+        self.pulse = PulseBar()
+
+        # Layout
+        content = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(content); vbox.setContentsMargins(0,0,0,0); vbox.setSpacing(0)
+        vbox.addWidget(self.pulse)
+        row = QtWidgets.QHBoxLayout(); row.setContentsMargins(0,0,0,0); row.setSpacing(0)
+        row.addWidget(self.sidebar); row.addWidget(self.stack, 1); vbox.addLayout(row)
+        scroll = QtWidgets.QScrollArea(); scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame); scroll.setWidgetResizable(True); scroll.setWidget(content)
+        self.setCentralWidget(scroll)
+
+        tb = QtWidgets.QToolBar("Main", self); tb.setMovable(False); tb.setIconSize(QtCore.QSize(16,16))
+        self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, tb)
+        act_toggle = QtGui.QAction("☰ Sidebar", self); act_toggle.setShortcut(QtGui.QKeySequence("Ctrl+B")); act_toggle.triggered.connect(self.toggle_sidebar); tb.addAction(act_toggle)
+        try:
+            pass
+        except Exception:
+            pass
+
+        # Performance Mode action (disables shadows)
+        self.act_perf = QtGui.QAction("Performance Mode (disable shadows)", self, checkable=True)
+        self.act_perf.setShortcut(QtGui.QKeySequence("Ctrl+Shift+P"))
+        self.act_perf.toggled.connect(self._toggle_perf_mode)
+        tb.addAction(self.act_perf)
+        try:
+            # Also expose in Suite menu if present
+            self.menuBar().addMenu("Suite").addAction(self.act_perf)
+        except Exception:
+            pass
+
+
+        # Wiring
+        self.btn_home.clicked.connect(lambda: self.set_page("Home"))
+        self.btn_input.clicked.connect(lambda: self.set_page("InputRX"))
+        self.btn_cross.clicked.connect(lambda: self.set_page("CrossXir"))
+        self.btn_launch.clicked.connect(lambda: self.set_page("Launcher"))
+        self.btn_stream.clicked.connect(lambda: self.set_page("Streamer"))
+        self.btn_drift.clicked.connect(lambda: self.set_page("Drift"))
+        self.btn_uwp.clicked.connect(lambda: self.set_page("UWP Launch"))
+
+        self.eventBus.connect(lambda _: self.pulse.flash("event", 900))
+
+        # Default page -> Home (Navigation)
+        self.set_page("Home")
+    def _toggle_perf_mode(self, on: bool):
+        # Toggle global perf flag and let InputRX tab reduce event load
+        try:
+            app = QtWidgets.QApplication.instance()
+            if app: app.setProperty("perfMode", bool(on))
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "inputTab") and self.inputTab is not None:
+                self.inputTab.set_perf_mode(bool(on))
+        except Exception:
+            pass
+        # Update visuals immediately
+        try:
+            self.repaint()
+        except Exception:
+            pass
+
+
+
+    def toggle_sidebar(self):
+        showing = self.sidebar.maximumWidth() > 0
+        if showing: self.sidebar.setMaximumWidth(0); self.sidebar.setFixedWidth(0)
+        else: self.sidebar.setMaximumWidth(self.sidebar_width); self.sidebar.setFixedWidth(self.sidebar_width)
+
+    def _check_btn(self, btn: QtWidgets.QPushButton):
+        for b in (self.btn_home, self.btn_input, self.btn_cross, self.btn_launch, self.btn_stream, self.btn_drift, self.btn_uwp):
+            try:
+                if b is not btn: b.setChecked(False)
+            except Exception: pass
+        try: btn.setChecked(True)
+        except Exception: pass
+
+    def set_page(self, name: str):
+        idx = None
+        if name in ("Home", "Navigation"):
+            idx = self.stack.indexOf(self.homeTab); self._check_btn(self.btn_home)
+        elif name == "InputRX":
+            idx = self.stack.indexOf(self.inputTab); self._check_btn(self.btn_input)
+        elif name == "CrossXir":
+            idx = self.stack.indexOf(self.crossTab); self._check_btn(self.btn_cross)
+        elif name == "Launcher":
+            idx = self.stack.indexOf(self.launcherTab); self._check_btn(self.btn_launch)
+        elif name == "Streamer":
+            idx = self.stack.indexOf(self.streamTab); self._check_btn(self.btn_stream)
+        elif name == "Drift":
+            idx = self.stack.indexOf(self.driftTab); self._check_btn(self.btn_drift)
+        elif name == "UWP Launch":
+            idx = self.stack.indexOf(self.uwpLaunchTab); self._check_btn(self.btn_uwp)
+        if idx is not None and idx >= 0:
+            self.stack.setCurrentIndex(idx)
+def main():
+    # High DPI
+    for flag in ("AA_EnableHighDpiScaling","AA_UseHighDpiPixmaps"):
+        attr = getattr(QtCore.Qt.ApplicationAttribute, flag, None)
+        if attr is not None: QtWidgets.QApplication.setAttribute(attr, True)
+    app = QtWidgets.QApplication(sys.argv)
+    app.setProperty("perfMode", False)
+    win = SuiteWindow(); win.show()
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()
+
+
+# --- injected: bind missing SuiteWindow._toggle_perf_mode at runtime ---
+def _suite__toggle_perf_mode(self, on: bool):
+    try:
+        app = QtWidgets.QApplication.instance()
+        if app: app.setProperty("perfMode", bool(on))
+    except Exception:
+        pass
+    try:
+        if hasattr(self, "inputTab") and self.inputTab is not None:
+            self.inputTab.set_perf_mode(bool(on))
+    except Exception:
+        pass
+    try:
+        self.repaint()
+    except Exception:
+        pass
+
+try:
+    SuiteWindow._toggle_perf_mode = _suite__toggle_perf_mode
+except Exception:
+    # If SuiteWindow is not yet defined due to earlier syntax, this will be a no-op.
+    pass
