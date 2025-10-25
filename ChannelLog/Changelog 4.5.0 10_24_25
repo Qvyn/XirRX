@@ -1,0 +1,69 @@
+🧩 Core Architecture & Structure
+
+Rebuilt the suite’s front end with a refreshed “Navigation” home page, tile cards, and a redesigned sidebar (TileButton UI).
+
+Removed External Mode logic completely — all external-mode checks and toggles were deleted.
+
+Game detection and “Game Running” LED were removed, eliminating lag and background process scanning.
+
+Added a minimal TileButton class to replace undefined references and unify sidebar tab design
+
+🖥️ UI & Interaction Changes
+
+Introduced pill-style “StatusBadge” labels replacing LED indicators (green/red → textual “running” / “stopped”).
+
+Redesigned Quick Status panel:
+
+Removed the “Open Launcher” button.
+
+Switched to direct toggle-based state management (no background scanning).
+
+Lowered rebinder interval from 1000 ms → 3000 ms to reduce CPU load.
+
+Sidebar navigation reordered:
+
+Launcher and UWP Launcher now appear next to each other.
+
+Drift Lab moved to the bottom.
+
+Began integrating Switch + StatusBadge inside each navigation tile (InputRX, CrossXir, Streamer) — groundwork added for next iteration.
+
+⚙️ Behavior and Logic
+
+All feature toggles (InputRX, CrossXir, Streamer) now drive their functions directly; no more “running” state detection.
+
+InputRX and CrossXir are enabled by default on app start.
+
+Removed dependency on psutil for runtime status checks (was causing UI delay).
+
+QuickStatus refresh now relies purely on toggle signals instead of polling
+
+suite_one_app_safe_baseline_PRO
+
+.
+
+Updated _toggle_* methods to simplify toggle actions and messaging consistency.
+
+Deleted unused _game_running() and _kick_scan() functions.
+
+🧠 Code Cleanups & Fixes
+
+Patched undefined variable errors:
+
+Added missing TileButton definition.
+
+Removed all references to launch_btn (caused AttributeError before).
+
+Removed redundant QuickStatus rebinder calls and replaced with simplified update cycles.
+
+Merged multiple redundant _resolve_suite() variants into one clean, consistent method.
+
+Cleaned legacy indentation errors, improved layout spacing, and replaced manual color-based status with semantic badges.
+
+🪄 Visual / Theming
+
+Tiles and sidebar now use soft gradients, rounded corners, and hover animations.
+
+Simplified status color logic — now based on consistent theme palette instead of arbitrary QColors.
+
+Improved alignment/padding in NavCard and status controls for cleaner layout.
