@@ -1,11 +1,3 @@
-
-# suite_one_app_safe_baseline_fixed.py
-# Clean baseline:
-# - Manual controls only (no auto stop/hide/start/show)
-# - Streamer Mode (exclude overlay from capture) via tray + Streamer tab
-# - Tabs: InputRX, CrossXir, Launcher, Streamer
-# - No Safety Mode, Auto-Rules disabled (not included here)
-# - Passive watchdog (only re-applies capture exclusion)
 import os, sys, json, subprocess, signal, shlex, pathlib, ctypes
 from typing import List, Dict, Optional
 from PyQt6 import QtCore, QtGui, QtWidgets

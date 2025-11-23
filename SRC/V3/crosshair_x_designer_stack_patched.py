@@ -1,3 +1,13 @@
+# crosshair_x_designer_stack_patched.py
+# Clean, runnable PyQt6 build. Implements:
+#  - Advanced tab with toggles: Sniper mask (vignette), Animated/extra reticles, Auto‑fade on mouse move,
+#    Sub‑monitor anchoring (Center/Edges/Corners)
+#  - Preset Save/Delete + Import/Export (JSON, multiple presets)
+#  - Live Preview synced to Overlay timer + Designer changes
+#  - Respect thickness/outline for all styles
+#
+# Safe (no hooks): polls GetAsyncKeyState and XInput triggers if present. No input injection.
+
 from __future__ import annotations
 import sys, os, json, ctypes, math, time
 from dataclasses import dataclass, asdict, fields

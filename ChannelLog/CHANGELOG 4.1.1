@@ -1,0 +1,7 @@
+Release: 4.1.1
+Base: input_refiner_pyqt6_stable_patched_ultrasens.py
+Date: 2025-10-21
+
+Fixes:
+-Crash prevention: Resolved ValueError and OverflowError during SendInput mouse delta conversion (previously caused by NaN or ∞ values).
+-Worker stability: Prevented unhandled float conversions that previously logged repeated “cannot convert float NaN to integer” errors

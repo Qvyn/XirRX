@@ -1,8 +1,28 @@
+# crosshair_x_designer_stack_patched.py — with Crash Watchdog + Audio‑Reaction settings
+# Safe, runnable PyQt6 build. New in this patch:
+#  - Crash Watchdog: logs crashes, optional auto‑restart, overlay stall recovery
+#  - Audio Reaction: optional mic/loopback amplitude drives scale/opacity/glow pulse
+#
+# Notes:
+#  • Audio reaction uses the optional 'sounddevice' (and numpy) backend if available.
+#    If not installed, the Audio panel appears with guidance and controls are disabled.
+#    To enable:  pip install sounddevice numpy
+#  • No hooks/injection. Still polls GetAsyncKeyState/XInput for effects.
+
 from __future__ import annotations
-import sys, os, json, ctypes, math, time
+import sys, os, json, ctypes, math, time, traceback
 from dataclasses import dataclass, asdict, fields
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from PyQt6 import QtCore, QtGui, QtWidgets
+
+# -------- Optional audio backend --------
+AUDIO_AVAILABLE = False
+try:
+    import sounddevice as sd  # type: ignore
+    import numpy as np        # type: ignore
+    AUDIO_AVAILABLE = True
+except Exception:
+    AUDIO_AVAILABLE = False
 
 APP_NAME = "CrossXir"
 ORG = "eztools"
@@ -11,6 +31,7 @@ APPDATA_DIR = os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming', ORG)
 os.makedirs(APPDATA_DIR, exist_ok=True)
 PRESETS_PATH = os.path.join(APPDATA_DIR, 'crossxir_presets.json')
 LAST_STATE = os.path.join(APPDATA_DIR, 'crossxir_last_state.json')
+CRASH_LOG = os.path.join(APPDATA_DIR, 'crossxir_crash.log')
 
 IS_WIN = os.name == 'nt'
 
@@ -69,6 +90,34 @@ if IS_WIN:
     except Exception:
         XINPUT_AVAILABLE = False
 
+# ---------------- Crash Watchdog ----------------
+def _write_crash_log(msg: str):
+    try:
+        with open(CRASH_LOG, 'a', encoding='utf-8') as f:
+            f.write(time.strftime('%Y-%m-%d %H:%M:%S') + "\n")
+            f.write(msg + "\n\n")
+    except Exception:
+        pass
+
+def _restart_app():
+    try:
+        python = sys.executable
+        os.execl(python, python, *sys.argv)
+    except Exception:
+        os._exit(1)
+
+def _install_excepthook():
+    def _hook(exc_type, exc, tb):
+        tb_str = ''.join(traceback.format_exception(exc_type, exc, tb))
+        _write_crash_log(tb_str)
+        try:
+            st = load_last_state()
+            if getattr(st, 'watchdog_auto_restart_app', True):
+                _restart_app()
+        except Exception:
+            _restart_app()
+    sys.excepthook = _hook
+
 # ---------------- State ----------------
 @dataclass
 class CrosshairState:
@@ -109,6 +158,18 @@ class CrosshairState:
     bloom_enabled: bool = True
     bloom_decay_ms: int = 220
     bloom_scale_pct: int = 120
+
+    # audio reaction (new)
+    audio_enabled: bool = False
+    audio_mode: str = "Scale"   # Scale, Opacity, GlowPulse
+    audio_sensitivity: int = 50  # 1-100 (50 ~ neutral)
+    audio_smooth_ms: int = 150
+    audio_device: str = "Default"
+
+    # crash watchdog (new)
+    watchdog_enabled: bool = True
+    watchdog_overlay_threshold_ms: int = 5000
+    watchdog_auto_restart_app: bool = True
 
 # ---------------- IO ----------------
 
@@ -168,9 +229,19 @@ def _set_pen(p: QtGui.QPainter, color: QtGui.QColor, width: int):
     p.setPen(pen)
 
 
-def draw_crosshair(p: QtGui.QPainter, rect: QtCore.QRect, state: CrosshairState, phase: float, bloom_factor: float, opacity_mult: float = 1.0):
-    """Render all styles with thickness + optional outline pass."""
-    p.save(); p.setOpacity(max(0.0, min(1.0, opacity_mult)))
+def draw_crosshair(p: QtGui.QPainter, rect: QtCore.QRect, state: CrosshairState, phase: float, bloom_factor: float, opacity_mult: float = 1.0,
+                   audio_factor: float = 0.0, audio_mode: str = "None"):
+    """Render all styles with thickness + optional outline pass.
+       audio_factor: 0..1, audio_mode in {None, Scale, Opacity, GlowPulse}
+    """
+    audio_factor = max(0.0, min(1.0, audio_factor))
+
+    # Opacity modulation by audio (if chosen)
+    eff_opacity = opacity_mult
+    if audio_mode == "Opacity":
+        eff_opacity = max(0.05, min(1.0, opacity_mult * (0.6 + 0.4*audio_factor)))
+
+    p.save(); p.setOpacity(max(0.0, min(1.0, eff_opacity)))
     p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
     center = rect.center()
 
@@ -181,6 +252,10 @@ def draw_crosshair(p: QtGui.QPainter, rect: QtCore.QRect, state: CrosshairState,
         eff_size = int(state.size * (0.9 + 0.2*math.sin(phase*2*math.pi)))
     elif state.anim_mode == "Expand":
         eff_size = int(state.size * (1.0 + 0.4*phase))
+
+    # Audio scale (if chosen)
+    if audio_mode == "Scale":
+        eff_size = int(eff_size * (1.0 + 0.35*audio_factor))
 
     # Sniper scaling
     def _sniper_active():
@@ -260,11 +335,7 @@ def draw_crosshair(p: QtGui.QPainter, rect: QtCore.QRect, state: CrosshairState,
 
     elif style == "Chevron":
         p.save(); p.translate(center); p.rotate(state.rotation)
-        path = QtGui.QPainterPath()
         L = eff_size
-        # simple V shape outline respecting thickness via path strokes
-        path.moveTo(-L, 0); path.lineTo(0, -L); path.lineTo(L, 0)
-        # stroke twice via draw_lines for consistent look
         lines = [(QtCore.QPoint(-L, 0), QtCore.QPoint(0, -L)), (QtCore.QPoint(0, -L), QtCore.QPoint(L, 0))]
         draw_lines(lines)
         p.restore()
@@ -295,16 +366,12 @@ def draw_crosshair(p: QtGui.QPainter, rect: QtCore.QRect, state: CrosshairState,
     elif style == "Brackets":
         L = eff_size; g2 = g
         lines = [
-            # TL
             (QtCore.QPoint(center.x()-L-g2, center.y()-L-g2), QtCore.QPoint(center.x()-L//2, center.y()-L-g2)),
             (QtCore.QPoint(center.x()-L-g2, center.y()-L-g2), QtCore.QPoint(center.x()-L-g2, center.y()-L//2)),
-            # TR
             (QtCore.QPoint(center.x()+L+g2, center.y()-L-g2), QtCore.QPoint(center.x()+L//2, center.y()-L-g2)),
             (QtCore.QPoint(center.x()+L+g2, center.y()-L-g2), QtCore.QPoint(center.x()+L+g2, center.y()-L//2)),
-            # BL
             (QtCore.QPoint(center.x()-L-g2, center.y()+L+g2), QtCore.QPoint(center.x()-L//2, center.y()+L+g2)),
             (QtCore.QPoint(center.x()-L-g2, center.y()+L+g2), QtCore.QPoint(center.x()-L-g2, center.y()+L//2)),
-            # BR
             (QtCore.QPoint(center.x()+L+g2, center.y()+L+g2), QtCore.QPoint(center.x()+L//2, center.y()+L+g2)),
             (QtCore.QPoint(center.x()+L+g2, center.y()+L+g2), QtCore.QPoint(center.x()+L+g2, center.y()+L//2)),
         ]
@@ -316,6 +383,37 @@ def draw_crosshair(p: QtGui.QPainter, rect: QtCore.QRect, state: CrosshairState,
     p.drawEllipse(center, 1, 1)
     p.restore()
 
+# ---------------- Audio monitor ----------------
+class AudioMonitor(QtCore.QThread):
+    levelChanged = QtCore.pyqtSignal(float)  # 0..~1
+    def __init__(self, device: Optional[int] = None, parent=None):
+        super().__init__(parent)
+        self._stop = False
+        self._device = device
+
+    def run(self):
+        if not AUDIO_AVAILABLE:
+            return
+        try:
+            def _cb(indata, frames, time_info, status):
+                try:
+                    if status:
+                        pass
+                    # RMS level per block
+                    rms = float(np.sqrt(np.mean(np.square(indata))))
+                    # Clip to ~[0,1]
+                    self.levelChanged.emit(max(0.0, min(1.0, rms * 8.0)))
+                except Exception:
+                    pass
+            with sd.InputStream(channels=1, samplerate=44100, blocksize=1024, callback=_cb, device=self._device):
+                while not self._stop:
+                    sd.sleep(100)
+        except Exception as e:
+            _write_crash_log(f"AudioMonitor error: {e}")
+
+    def stop(self):
+        self._stop = True
+
 # ---------------- Overlay widget ----------------
 class Overlay(QtWidgets.QWidget):
     def __init__(self, state: CrosshairState):
@@ -323,6 +421,14 @@ class Overlay(QtWidgets.QWidget):
         self.state = state
         self.phase = 0.0
         self.bloom_until = 0
+        self._last_paint_ms = int(time.time()*1000)
+        self._opacity_mult = 1.0
+        self._last_mouse_pos = QtGui.QCursor.pos()
+        self._last_move_ms = int(time.time()*1000)
+        # audio dynamics
+        self._audio_raw = 0.0
+        self._audio_smoothed = 0.0
+
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
         flags = (QtCore.Qt.WindowType.FramelessWindowHint
                  | QtCore.Qt.WindowType.Tool
@@ -332,9 +438,6 @@ class Overlay(QtWidgets.QWidget):
         self.center_on_screen()
         QtCore.QTimer.singleShot(60, self.apply_click_through)
 
-        self._opacity_mult = 1.0
-        self._last_mouse_pos = QtGui.QCursor.pos()
-        self._last_move_ms = int(time.time()*1000)
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(16)
         self.timer.timeout.connect(self._tick)
@@ -387,6 +490,8 @@ class Overlay(QtWidgets.QWidget):
         if self.state.bloom_enabled and (rt_active or lmb_active):
             now = int(time.time() * 1000)
             self.bloom_until = now + max(50, int(self.state.bloom_decay_ms))
+
+        # auto-fade on mouse move
         if self.state.auto_fade_on_move:
             now = int(time.time()*1000)
             pos = QtGui.QCursor.pos()
@@ -398,31 +503,41 @@ class Overlay(QtWidgets.QWidget):
             self._opacity_mult += (target - self._opacity_mult) * 0.2
         else:
             self._opacity_mult += (1.0 - self._opacity_mult) * 0.2
+
+        # audio smoothing
+        if self.state.audio_enabled:
+            dt = 16.0
+            tau = max(1.0, float(self.state.audio_smooth_ms))
+            alpha = min(1.0, dt / tau)
+            target = max(0.0, min(1.0, self._audio_raw * (self.state.audio_sensitivity/50.0)))
+            self._audio_smoothed += (target - self._audio_smoothed) * alpha
+        else:
+            self._audio_smoothed *= 0.92
+
         self.update()
 
     def paintEvent(self, ev):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
         rect = self.rect()
+        now = int(time.time()*1000)
+        self._last_paint_ms = now
+
+        # click-trigger bloom decay
         bloom_factor = 0.0
         if self.bloom_until:
-            now = int(time.time()*1000)
             if now < self.bloom_until:
                 bloom_factor = (self.bloom_until - now) / max(1, self.state.bloom_decay_ms)
             else:
                 self.bloom_until = 0
-        draw_crosshair(p, rect, self.state, self.phase, bloom_factor, self._opacity_mult)
-        if self.state.sniper_mask_enabled and (IS_WIN and ((GetAsyncKeyState and (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) or (XINPUT_AVAILABLE and XInputReader.lt_pressed()))):
-            p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
-            shade = QtGui.QColor(0,0,0,int(255 * max(0, min(1, self.state.vignette_strength/100.0))))
-            path = QtGui.QPainterPath()
-            path.addRect(QtCore.QRectF(rect))
-            r = max(30, int(min(rect.width(), rect.height())*0.18))
-            cx, cy = rect.center().x(), rect.center().y()
-            hole = QtGui.QPainterPath()
-            hole.addEllipse(QtCore.QRectF(float(cx - r), float(cy - r), float(2*r), float(2*r)))
-            mask = path.subtracted(hole)
-            p.fillPath(mask, shade)
+
+        # audio influence for glow pulse
+        audio_factor = self._audio_smoothed if self.state.audio_enabled else 0.0
+        if self.state.audio_enabled and self.state.audio_mode == "GlowPulse":
+            bloom_factor = max(bloom_factor, audio_factor)
+
+        draw_crosshair(p, rect, self.state, self.phase, bloom_factor, self._opacity_mult,
+                       audio_factor=audio_factor, audio_mode=(self.state.audio_mode if self.state.audio_enabled else "None"))
 
 # ---------------- Designer panel ----------------
 class DesignerPanel(QtWidgets.QWidget):
@@ -653,7 +768,10 @@ class SupportPanel(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         lay = QtWidgets.QVBoxLayout(self)
-        lay.addWidget(QtWidgets.QLabel("CrossXir — no hooks. Use Position tab for multi‑monitor & anchors. Import/Export presets in Advanced."))
+        msg = "CrossXir — no hooks. Use Position tab for multi‑monitor & anchors. Import/Export presets in Advanced."
+        if not AUDIO_AVAILABLE:
+            msg += "\n\nAudio: install 'sounddevice' + 'numpy' to enable Audio Reaction (pip install sounddevice numpy)."
+        lay.addWidget(QtWidgets.QLabel(msg))
         lay.addStretch(1)
 
 # ---------------- Advanced panel ----------------
@@ -673,6 +791,10 @@ class AdvancedPanel(QtWidgets.QWidget):
         self.fade_min = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal); self.fade_min.setRange(5,100); self.fade_min.setValue(int(self.overlay.state.fade_min_opacity*100))
         self.fade_delay = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal); self.fade_delay.setRange(50,1500); self.fade_delay.setValue(self.overlay.state.fade_still_delay_ms)
         self.anchor = QtWidgets.QComboBox(); self.anchor.addItems(["Center","Top","Bottom","Left","Right","Top-Left","Top-Right","Bottom-Left","Bottom-Right"]) ; self.anchor.setCurrentText(self.overlay.state.anchor_mode)
+        # Watchdog controls (new)
+        self.chk_watchdog = QtWidgets.QCheckBox("Crash Watchdog (recover overlay)"); self.chk_watchdog.setChecked(self.overlay.state.watchdog_enabled)
+        self.watchdog_thresh = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal); self.watchdog_thresh.setRange(1000,15000); self.watchdog_thresh.setValue(self.overlay.state.watchdog_overlay_threshold_ms)
+        self.chk_watchdog_restart = QtWidgets.QCheckBox("Auto‑restart app on crash"); self.chk_watchdog_restart.setChecked(self.overlay.state.watchdog_auto_restart_app)
         # Preset import/export
         btns = QtWidgets.QHBoxLayout(); self.btn_export = QtWidgets.QPushButton("Export Presets..."); self.btn_import = QtWidgets.QPushButton("Import Presets...")
         btns.addWidget(self.btn_export); btns.addWidget(self.btn_import)
@@ -685,9 +807,14 @@ class AdvancedPanel(QtWidgets.QWidget):
         lay.addRow("Fade Min Opacity", self.fade_min)
         lay.addRow("Fade Still Delay (ms)", self.fade_delay)
         lay.addRow("Anchor", self.anchor)
+        # Watchdog section
+        lay.addRow(self.chk_watchdog)
+        lay.addRow("Overlay stall threshold (ms)", self.watchdog_thresh)
+        lay.addRow(self.chk_watchdog_restart)
         lay.addRow(btns)
         # Signals
-        for w in (self.theme, self.chk_sniper_mask, self.vignette, self.chk_pack, self.chk_autofade, self.fade_min, self.fade_delay, self.anchor):
+        for w in (self.theme, self.chk_sniper_mask, self.vignette, self.chk_pack, self.chk_autofade, self.fade_min, self.fade_delay, self.anchor,
+                  self.chk_watchdog, self.watchdog_thresh, self.chk_watchdog_restart):
             if isinstance(w, QtWidgets.QCheckBox): w.toggled.connect(self._apply)
             elif isinstance(w, QtWidgets.QSlider): w.valueChanged.connect(self._apply)
             elif isinstance(w, QtWidgets.QComboBox): w.currentTextChanged.connect(self._apply)
@@ -707,6 +834,10 @@ class AdvancedPanel(QtWidgets.QWidget):
         s.fade_min_opacity = max(0.05, self.fade_min.value()/100.0)
         s.fade_still_delay_ms = self.fade_delay.value()
         s.anchor_mode = self.anchor.currentText()
+        # watchdog
+        s.watchdog_enabled = self.chk_watchdog.isChecked()
+        s.watchdog_overlay_threshold_ms = self.watchdog_thresh.value()
+        s.watchdog_auto_restart_app = self.chk_watchdog_restart.isChecked()
         self.overlay.set_state(s)
         self.designer.refresh_styles()
 
@@ -736,6 +867,68 @@ class AdvancedPanel(QtWidgets.QWidget):
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "Import Failed", str(e))
 
+# ---------------- Audio panel ----------------
+class AudioPanel(QtWidgets.QWidget):
+    def __init__(self, overlay: Overlay, on_settings_changed):
+        super().__init__()
+        self.overlay = overlay
+        self._on_settings_changed = on_settings_changed
+        lay = QtWidgets.QFormLayout(self)
+
+        self.enable = QtWidgets.QCheckBox("Enable Audio Reaction"); self.enable.setChecked(self.overlay.state.audio_enabled)
+        self.mode = QtWidgets.QComboBox(); self.mode.addItems(["Scale","Opacity","GlowPulse"]); self.mode.setCurrentText(self.overlay.state.audio_mode)
+        self.sens = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal); self.sens.setRange(1,100); self.sens.setValue(self.overlay.state.audio_sensitivity)
+        self.smooth = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal); self.smooth.setRange(0,1000); self.smooth.setValue(self.overlay.state.audio_smooth_ms)
+
+        self.device = QtWidgets.QComboBox()
+        self.device.addItem("Default")
+        if AUDIO_AVAILABLE:
+            try:
+                for i, dev in enumerate(sd.query_devices()):
+                    if dev.get('max_input_channels', 0) > 0:
+                        self.device.addItem(f"{i}: {dev['name']}")
+            except Exception:
+                pass
+        self.device.setCurrentText(self.overlay.state.audio_device if self.overlay.state.audio_device else "Default")
+
+        self.level = QtWidgets.QProgressBar(); self.level.setRange(0,100); self.level.setValue(0)
+        self._meter_timer = QtCore.QTimer(self); self._meter_timer.setInterval(60); self._meter_timer.timeout.connect(self._tick_meter); self._meter_timer.start()
+
+        lay.addRow(self.enable)
+        lay.addRow("Reaction Mode", self.mode)
+        lay.addRow("Sensitivity", self.sens)
+        lay.addRow("Smoothing (ms)", self.smooth)
+        lay.addRow("Audio Device", self.device)
+        lay.addRow("Live Level", self.level)
+
+        if not AUDIO_AVAILABLE:
+            hint = QtWidgets.QLabel("Install 'sounddevice' + 'numpy' to enable (pip install sounddevice numpy).")
+            hint.setStyleSheet("color:#c97a7a")
+            lay.addRow(hint)
+            # Disable controls when backend missing
+            for w in (self.enable, self.mode, self.sens, self.smooth, self.device):
+                w.setEnabled(False)
+
+        for w in (self.enable, self.mode, self.sens, self.smooth, self.device):
+            if isinstance(w, QtWidgets.QCheckBox): w.toggled.connect(self._apply)
+            elif isinstance(w, QtWidgets.QComboBox): w.currentTextChanged.connect(self._apply)
+            elif isinstance(w, QtWidgets.QSlider): w.valueChanged.connect(self._apply)
+
+    def _tick_meter(self):
+        val = int(max(0.0, min(1.0, getattr(self.overlay, '_audio_smoothed', 0.0))) * 100)
+        self.level.setValue(val)
+
+    def _apply(self, *_):
+        s = self.overlay.state
+        s.audio_enabled = self.enable.isChecked()
+        s.audio_mode = self.mode.currentText()
+        s.audio_sensitivity = self.sens.value()
+        s.audio_smooth_ms = self.smooth.value()
+        s.audio_device = self.device.currentText() or "Default"
+        self.overlay.set_state(s)
+        save_last_state(s)
+        self._on_settings_changed()
+
 # ---------------- Preview ----------------
 class Preview(QtWidgets.QWidget):
     def __init__(self, overlay: Overlay):
@@ -749,7 +942,7 @@ class Preview(QtWidgets.QWidget):
         p.setPen(QtGui.QPen(QtGui.QColor(40,40,48),1))
         for x in range(0, self.width(), 20): p.drawLine(x,0,x,self.height())
         for y in range(0, self.height(), 20): p.drawLine(0,y,self.width(),y)
-        draw_crosshair(p, self.rect(), self.overlay.state, 0.0, 0.0, 1.0)
+        draw_crosshair(p, self.rect(), self.overlay.state, 0.0, 0.0, 1.0, audio_factor=0.0, audio_mode="None")
 
 # ---------------- Main Window ----------------
 class MainWindow(QtWidgets.QWidget):
@@ -757,14 +950,14 @@ class MainWindow(QtWidgets.QWidget):
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowType.WindowStaysOnTopHint)
-        self.setMinimumSize(980,560)
+        self.setMinimumSize(1040,560)
         self.setWindowIcon(self._load_icon())
         self.overlay = Overlay(load_last_state()); self.overlay.show()
 
         root = QtWidgets.QHBoxLayout(self)
         self.sidebar = QtWidgets.QListWidget(); self.sidebar.setFixedWidth(200)
         self.sidebar.setSpacing(6)
-        for item in ("Crosshairs","Display","Position & Size","Designer","Advanced","Support"):
+        for item in ("Crosshairs","Display","Position & Size","Designer","Advanced","Audio","Support"):
             self.sidebar.addItem(item)
 
         self.stack = QtWidgets.QStackedWidget()
@@ -774,7 +967,8 @@ class MainWindow(QtWidgets.QWidget):
         self.page_pos = PositionPanel(self.overlay)
         self.page_support = SupportPanel()
         self.page_adv = AdvancedPanel(self.overlay, self.designer)
-        for w in (self.page_presets, self.page_display, self.page_pos, self.designer, self.page_adv, self.page_support):
+        self.page_audio = AudioPanel(self.overlay, self._sync_audio_monitor)
+        for w in (self.page_presets, self.page_display, self.page_pos, self.designer, self.page_adv, self.page_audio, self.page_support):
             self.stack.addWidget(w)
         self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.sidebar.setCurrentRow(3)
@@ -785,7 +979,7 @@ class MainWindow(QtWidgets.QWidget):
         splitter.addWidget(self.sidebar)
         splitter.addWidget(self.stack)
         splitter.addWidget(self.preview)
-        splitter.setSizes([200,560,320])
+        splitter.setSizes([200,580,320])
         root.addWidget(splitter)
 
         # keep preview live with overlay timer
@@ -803,25 +997,22 @@ class MainWindow(QtWidgets.QWidget):
         self._apply_theme("Windows 11")
         self.page_adv.themeChanged.connect(self._apply_theme)
 
+        # Watchdog timer
+        self._wd_timer = QtCore.QTimer(self); self._wd_timer.setInterval(1000); self._wd_timer.timeout.connect(self._watchdog_tick); self._wd_timer.start()
+
+        # Audio monitor (lazy start depending on settings)
+        self.audio_monitor: Optional[AudioMonitor] = None
+        self._sync_audio_monitor()
+
     def _apply_theme(self, name: str):
-        # Windows 11 visual language: low-radius corners (~8px), subdued borders, focus/hover clarity,
-        # Segoe UI Variable if available. Other themes remain as before.
         if name == "Windows 11":
-            accent = "#5B9BFA"   # Win11 accent-ish
-            bg = "#0F1115"
-            bg2 = "#141820"
-            border = "#2A2F3A"
-            text = "#E6E7EC"
-            sub = "#B2B6C2"
-            r = 8  # border radius in px (less round)
+            accent = "#5B9BFA"; bg = "#0F1115"; bg2 = "#141820"; border = "#2A2F3A"; text = "#E6E7EC"; sub = "#B2B6C2"; r = 8
         elif name == "Neo Noir":
             accent = "#8A7AF5"; bg = "#0B0C10"; bg2 = "#0F1116"; border = "#242735"; text = "#E6E7EC"; sub = "#A9AABC"; r = 10
         elif name == "Graphite":
             accent = "#7A8C9E"; bg = "#0E0F12"; bg2 = "#12141A"; border = "#2A2D39"; text = "#E5E5E5"; sub = "#A7ABB3"; r = 10
-        else:  # Minimal
+        else:
             accent = "#ADB5BD"; bg = "#111216"; bg2 = "#151820"; border = "#242833"; text = "#E8E9ED"; sub = "#B5B8C1"; r = 8
-
-        # Apply consistent, lower radii and a Windows-y font stack
         self.setStyleSheet(f"""
             * {{ font-family: 'Segoe UI Variable', 'Segoe UI', 'Inter', system-ui, -apple-system, 'Helvetica Neue', Arial; }}
             QWidget{{background:{bg};color:{text};font-size:13px;}}
@@ -841,15 +1032,12 @@ class MainWindow(QtWidgets.QWidget):
         """)
 
     def _load_icon(self) -> QtGui.QIcon:
-        """Load branded icon if available; otherwise draw a square-ish fallback badge."""
-        # Prefer local working dir icon
         local_path = os.path.join(os.getcwd(), 'CrossXir_icon_cool.ico')
         tweaker_path = os.path.join('E:\\DInputTweaker', 'CrossXir_icon_cool.ico')
         sandbox_path = os.path.join('/mnt/data', 'CrossXir_icon_cool.ico')
         for pth in (local_path, tweaker_path, sandbox_path):
             if os.path.exists(pth):
                 return QtGui.QIcon(pth)
-        # Fallback painter icon (Win11-ish square)
         pm = QtGui.QPixmap(64,64)
         pm.fill(QtCore.Qt.GlobalColor.transparent)
         p = QtGui.QPainter(pm)
@@ -860,8 +1048,88 @@ class MainWindow(QtWidgets.QWidget):
         p.end()
         return QtGui.QIcon(pm)
 
+    # ---------- Audio monitor plumbing ----------
+    def _on_audio_level(self, val: float):
+        try:
+            self.overlay._audio_raw = float(max(0.0, min(1.0, val)))
+        except Exception:
+            pass
+
+    def _device_index_for_name(self, label: str) -> Optional[int]:
+        if not AUDIO_AVAILABLE or not label or label == "Default":
+            return None
+        try:
+            if ":" in label:
+                idx_str = label.split(":",1)[0].strip()
+                return int(idx_str)
+        except Exception:
+            pass
+        return None
+
+    def _sync_audio_monitor(self):
+        s = self.overlay.state
+        if s.audio_enabled and AUDIO_AVAILABLE:
+            dev_idx = self._device_index_for_name(s.audio_device)
+            need_restart = False
+            if self.audio_monitor is None:
+                need_restart = True
+            else:
+                if self.audio_monitor.isRunning() and self.audio_monitor._device != dev_idx:
+                    self._stop_audio_monitor(); need_restart = True
+                elif not self.audio_monitor.isRunning():
+                    need_restart = True
+            if need_restart:
+                try:
+                    self.audio_monitor = AudioMonitor(device=dev_idx)
+                    self.audio_monitor.levelChanged.connect(self._on_audio_level)
+                    self.audio_monitor.start()
+                except Exception as e:
+                    _write_crash_log(f"Failed to start audio monitor: {e}")
+        else:
+            self._stop_audio_monitor()
+
+    def _stop_audio_monitor(self):
+        m = self.audio_monitor
+        if m is not None:
+            try:
+                m.stop()
+                m.wait(1000)
+            except Exception:
+                pass
+        self.audio_monitor = None
+
+    # ---------- Watchdog ----------
+    def _watchdog_tick(self):
+        try:
+            s = self.overlay.state
+            if not getattr(s, 'watchdog_enabled', True):
+                return
+            now = int(time.time()*1000)
+            last = getattr(self.overlay, '_last_paint_ms', now)
+            if now - last > max(1000, int(s.watchdog_overlay_threshold_ms)):
+                # Attempt overlay recovery first
+                try:
+                    self.overlay.timer.stop()
+                    self.overlay.timer.start(16)
+                    self.overlay.update()
+                    self.overlay._last_paint_ms = now
+                except Exception:
+                    if getattr(s, 'watchdog_auto_restart_app', True):
+                        _write_crash_log('Watchdog: restarting app due to overlay stall')
+                        _restart_app()
+        except Exception as e:
+            _write_crash_log(f"Watchdog tick error: {e}")
+
+    def closeEvent(self, ev: QtGui.QCloseEvent):
+        try:
+            self._stop_audio_monitor()
+        except Exception:
+            pass
+        super().closeEvent(ev)
+
 # ---------------- main ----------------
 def main():
+    _install_excepthook()
     app = QtWidgets.QApplication(sys.argv)
     win = MainWindow(); win.show()
     sys.exit(app.exec())
