@@ -1,4 +1,4 @@
-# XirRx — v4.0.5
+# XirRx — v4.6
 
 A streamlined Windows gaming suite that bundles four pieces into one app:
 
@@ -8,18 +8,6 @@ A streamlined Windows gaming suite that bundles four pieces into one app:
 - **Streamer Mode** — one toggle to hide the overlay from captures while you still see it.
 
 > The suite hosts these tools and orchestrates them together; each tool keeps its own internal logic and UI. (See feature references at the end.)
-
----
-
-## What’s new in 4.0.5
-
-**Better Steam validation → launch flow**  
-- No log parsing. The launcher opens `steam://validate/<AppID>`, **watches Steam’s window title** for *Validating / Verifying / Updating*, and when it disappears for a few seconds, it **auto‑launches** your game.  
-- If Steam never shows those words (localization/skin), there’s a **safe fallback wait** so you never get stuck.
-
-**Suite polish & stability**  
-- InputRX and CrossXir are hosted inside tabs with clean start/stop and show/hide controls, plus a tray menu.  
-- Watchdogs and fault handlers write to `/logs` so crashes are easy to diagnose.
 
 ---
 
@@ -42,13 +30,6 @@ A streamlined Windows gaming suite that bundles four pieces into one app:
   - **Crash Watchdog** with auto‑restart and stall recovery, crash logs under AppData. fileciteturn3file1
   - XInput trigger awareness (e.g., sniper scaling on RMB/LT). fileciteturn3file1
 
-### Launcher (UWP/Xbox + Steam validation)
-- **Goal**: Launch UWP apps by **AUMID**, then apply **priority** and **CPU affinity** to the running process.  
-- **Highlights**:
-  - COM activation via `IApplicationActivationManager` with fallback, per‑title args, optional desktop shortcut creation. fileciteturn3file3
-  - **Priority/affinity** mapping including “all but CPU0” convenience mask. fileciteturn3file3
-  - **Steam validation first, then launch** using a **window‑title watcher** + **fallback wait** — no log parsing. fileciteturn3file3
-
 ### Streamer Mode & Suite
 - **Goal**: Make the overlay invisible to recordings/screenshots while remaining visible to you.  
 - **Highlights**:
@@ -65,65 +46,14 @@ A streamlined Windows gaming suite that bundles four pieces into one app:
 - Recommended packages for building: `PyQt6`, `psutil`, `comtypes`, `PyInstaller`. fileciteturn3file3
 
 ---
+##CHANGELOG
 
-## Quick start (as a user)
+- Removed Launcher completely
 
-1. Run **XirRx.exe**.  
-2. Tabs:  
-   - **InputRX** → Start/Stop worker; tweak sliders; save profiles.  
-   - **CrossXir** → Show/Hide overlay; pick style, size, gap, outline, effects.  
-   - **Launcher** → Add UWP title (AUMID), set args/priority/affinity; *optional*: Steam AppID.  
-   - **Streamer** → Toggle **Hide from capture** (you still see the overlay).  
-3. Use the **tray icon** for quick toggles and to launch saved titles. fileciteturn3file0
+- The Launcher/UWP tab is gone (no sidebar button, no stack page).
 
----
+- All Launcher code paths were removed, so the app no longer imports or depends on launcher.py.
 
-## Steam validation flow (optional)
+- Tray/menu items related to Launcher were remov
 
-Some titles require a validation pass before each launch (anti‑cheat or Platform rules).  
-- Set a **Steam AppID** on the entry and click **Validate via Steam**.  
-- XirRx opens `steam://validate/<AppID>`, **watches Steam’s title** for “Validating / Verifying / Updating”, and when it’s gone for ~5s, it **auto‑launches** your game.  
-- If your Steam skin/language doesn’t show those words, XirRx uses a **fallback wait** so you still launch. fileciteturn3file3
 
----
-
-## Build from source
-
-Baseline one‑file build (icon/name optional): fileciteturn3file0
-```powershell
-py -m PyInstaller --onefile --windowed --name XirRx ^
-  --icon "icons/Suite_Streamer_Crosshair_InputRX.ico" suite_one_app_safe_baseline_fixed.py
-```
-
----
-
-## Troubleshooting
-
-- **Overlay shows on stream** → Ensure **Streamer Mode** is ON and capture via modern **Display Capture**; don’t capture the overlay window directly. fileciteturn3file0  
-- **Tweaks didn’t apply** → Increase **Wait (s)** or set **Target EXE** exactly in the Launcher entry; verify AUMID. fileciteturn3file3  
-- **Controller not detected** → Check XInput drivers/cables; the worker logs to `input_refiner.log` under `/logs`. fileciteturn3file2  
-- **Crashes** → Crash watchdog will log and optionally auto‑restart CrossXir; check AppData crash log. fileciteturn3file1
-
----
-
-## Privacy
-
-- No telemetry. No remote calls. All logs are local to your machine. fileciteturn3file4
-
----
-
-## Credits / File Map
-
-- **Suite shell** (tabs, tray, capture exclusion, logs): `suite_one_app_safe_baseline_fixed.py`. fileciteturn3file4  
-- **Launcher** (UWP + Steam validation + priority/affinity): `launcher.py`. fileciteturn3file3  
-- **InputRX** (aim shaping, profiles, anti‑yank, cover‑guard): `input_refiner_pyqt6_stable_patched_ultrasens.py`. fileciteturn3file2  
-- **CrossXir** (overlay styles, audio reaction, watchdog): `crosshair_x_designer_stack_patched.py`. fileciteturn3file1
-
----
-
-## Changelog (high‑level)
-
-**4.0.5**  
-- Added **auto‑launch** after Steam validation.  
-- Replaced log parsing with a **window‑title watcher** + **fallback wait**.  
-- Stability & logging improvements across suite hosting and watchdogs. fileciteturn3file3turn3file4
