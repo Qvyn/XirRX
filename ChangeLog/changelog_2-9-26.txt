@@ -1,9 +1,0 @@
-Removed the Launcher/UWP tab completely from the app UI (no sidebar button, no page in the stack).
-
-Deleted all code paths that referenced launcher.py so the app no longer imports or depends on it.
-
-Removed related menu/tray entries (anything that opened or referenced the Launcher tab).
-
-Build script updated so it doesn’t look for or include launcher.py anymore.
-
-Fixed crash caused by leftover UI references (e.g., btn_uwp) after removing the tab.
